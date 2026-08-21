@@ -30,6 +30,7 @@ if os.path.exists(local_config):
     import config
 else:
     from config import config
+    a = 1
 
 os.environ['PYTHONUNBUFFERED'] = '1'
 VERSION = 'V1.3.2'
