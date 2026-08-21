@@ -18,7 +18,11 @@ class GetLicenseInfo():
     """
     def __init__(self, specified_servers=[], excluded_servers=[], specified_feature='', lmstat_path='lmstat', bsub_command='bsub -q normal -Is'):
         self.specified_feature = specified_feature
-        self.lmstat_path = lmstat_path
+        if isinstance(lmstat_path, (list, tuple)):
+            self.lmstat_path_list = list(lmstat_path)
+        else:
+            self.lmstat_path_list = [lmstat_path]
+        self.lmstat_path = self.lmstat_path_list[0] if self.lmstat_path_list else 'lmstat'
         self.bsub_command = bsub_command
 
         if specified_servers or excluded_servers:
@@ -83,15 +87,19 @@ class GetLicenseInfo():
                       }
         """
         # Get lmstat output message.
-        if 'LM_LICENSE_FILE' in os.environ:
-            stdout_list = []
-            lm_license_file_list = os.environ['LM_LICENSE_FILE'].split(':')
+        stdout_list = []
 
-            with ProcessPoolExecutor(max_workers=len(lm_license_file_list)) as executor:
+        if 'LM_LICENSE_FILE' in os.environ:
+            lm_license_file_list = [s for s in os.environ['LM_LICENSE_FILE'].split(':') if s]
+            if not lm_license_file_list:
+                lm_license_file_list = ['']
+
+            with ProcessPoolExecutor(max_workers=len(lm_license_file_list) * len(self.lmstat_path_list)) as executor:
                 job_list = []
 
-                for lm_license_file in lm_license_file_list:
-                    if lm_license_file:
+                for lmstat_path in self.lmstat_path_list:
+                    for lm_license_file in lm_license_file_list:
+                        self.lmstat_path = lmstat_path
                         lmstat_command = self.get_lmstat_command(specified_server=lm_license_file)
                         job_list.append(executor.submit(common.run_command, lmstat_command))
 
@@ -100,9 +108,18 @@ class GetLicenseInfo():
                         if isinstance(tuple_line, bytes):
                             stdout_list.extend(str(tuple_line, 'unicode_escape').split('\n'))
         else:
-            lmstat_command = self.get_lmstat_command()
-            (return_code, stdout, stderr) = common.run_command(lmstat_command)
-            stdout_list = str(stdout, 'unicode_escape').split('\n')
+            with ProcessPoolExecutor(max_workers=len(self.lmstat_path_list)) as executor:
+                job_list = []
+
+                for lmstat_path in self.lmstat_path_list:
+                    self.lmstat_path = lmstat_path
+                    lmstat_command = self.get_lmstat_command()
+                    job_list.append(executor.submit(common.run_command, lmstat_command))
+
+                for job in as_completed(job_list):
+                    for tuple_line in job.result():
+                        if isinstance(tuple_line, bytes):
+                            stdout_list.extend(str(tuple_line, 'unicode_escape').split('\n'))
 
         # Parse lmstat output message.
         license_dic = {}

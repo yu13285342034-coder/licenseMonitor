@@ -193,10 +193,22 @@ class MainWindow(QMainWindow):
                             os.environ['LM_LICENSE_FILE'] = str(line)
 
         if not hasattr(config, 'lmstat_path'):
-            config.lmstat_path = ''
-        elif config.lmstat_path and not os.path.exists(config.lmstat_path):
-            common.bprint('"' + str(config.lmstat_path) + '": no such lmstat file!', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
-            config.lmstat_path = ''
+            config.lmstat_path = []
+
+        if isinstance(config.lmstat_path, str):
+            config.lmstat_path = [config.lmstat_path]
+        elif not isinstance(config.lmstat_path, list):
+            config.lmstat_path = []
+
+        valid_lmstat_path_list = []
+
+        for one_lmstat_path in config.lmstat_path:
+            if one_lmstat_path and not os.path.exists(one_lmstat_path):
+                common.bprint('"' + str(one_lmstat_path) + '": no such lmstat file!', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+            elif one_lmstat_path:
+                valid_lmstat_path_list.append(one_lmstat_path)
+
+        config.lmstat_path = valid_lmstat_path_list
 
         if not hasattr(config, 'lmstat_bsub_command'):
             config.lmstat_bsub_command = ''

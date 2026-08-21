@@ -88,7 +88,12 @@ class Sampling:
                             os.environ['LM_LICENSE_FILE'] = str(line)
 
         if not hasattr(config, 'lmstat_path'):
-            config.lmstat_path = ''
+            config.lmstat_path = []
+
+        if isinstance(config.lmstat_path, str):
+            config.lmstat_path = [config.lmstat_path]
+        elif not isinstance(config.lmstat_path, list):
+            config.lmstat_path = []
 
         if not hasattr(config, 'lmstat_bsub_command'):
             config.lmstat_bsub_command = ''
