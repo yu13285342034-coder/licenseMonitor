@@ -18,6 +18,7 @@ sys.path.append(os.environ['LICENSE_MONITOR_INSTALL_PATH'])
 from common import common
 from common import common_license
 from common import common_sqlite3
+from common import common_license_log
 
 # Import local config file if exists.
 local_config_dir = str(os.environ['HOME']) + '/.licenseMonitor/config'
@@ -100,6 +101,41 @@ class Sampling:
 
         my_get_license_info = common_license.GetLicenseInfo(lmstat_path=config.lmstat_path, bsub_command=config.lmstat_bsub_command)
         self.license_dic = my_get_license_info.get_license_info()
+
+        self.log_parser = None
+        self.log_events_dic = {}
+        self.init_log_parser()
+
+    def init_log_parser(self):
+        """
+        Initialize license log parser if config is available, and pre-collect log events.
+        """
+        license_log_config_file = str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/config/others/license_log.yaml'
+
+        if hasattr(config, 'license_log_config_file') and config.license_log_config_file:
+            license_log_config_file = config.license_log_config_file
+
+        if (not os.path.exists(license_log_config_file)) or (not hasattr(config, 'db_path')) or (not config.db_path):
+            return
+
+        print('>>> Initializing license log parser ...')
+
+        self.log_parser = common_license_log.LicenseLogParser(
+            log_config_file=license_log_config_file,
+            db_path=config.db_path,
+        )
+
+        if not self.log_parser.log_dic:
+            common.bprint('No license log entries found in "' + str(license_log_config_file) + '". Log parsing will be skipped.', level='Info')
+            self.log_parser = None
+            return
+
+        for license_server in self.license_dic.keys():
+            events = self.log_parser.get_log_events(license_server)
+
+            if events:
+                print('    Collected ' + str(len(events)) + ' new log events for server "' + str(license_server) + '".')
+                self.log_events_dic.setdefault(license_server, []).extend(events)
 
     def create_db_path(self, db_path):
         """
@@ -467,6 +503,320 @@ class Sampling:
 
         return utilization_day_dic
 
+    def integrate_log_events_into_usage_db(self):
+        """
+        Merge license log events into usage.db after snapshot sampling.
+          - OUT events not already in usage.db → INSERT (sessions missed by all snapshots).
+          - IN events                           → UPDATE sample_second/sample_time to actual end time
+                                                  (fixes runtime underestimation when session ends between snapshots).
+        """
+        if not self.log_events_dic:
+            return
+
+        print('>>> Integrating license log events into usage db ...')
+
+        for license_server in self.license_dic.keys():
+            if license_server not in self.log_events_dic:
+                continue
+
+            events = self.log_events_dic[license_server]
+
+            if not events:
+                continue
+
+            events_by_vendor_feature = {}
+            for event in events:
+                vendor_daemon = self.find_vendor_for_feature(license_server, event['feature'])
+
+                if vendor_daemon:
+                    events_by_vendor_feature.setdefault(vendor_daemon, []).append(event)
+
+            for vendor_daemon in events_by_vendor_feature.keys():
+                db_path = str(config.db_path) + '/license_server/' + str(license_server) + '/' + str(vendor_daemon)
+                usage_db_file = str(db_path) + '/usage.db'
+
+                if not os.path.exists(usage_db_file):
+                    continue
+
+                (result, usage_db_conn) = common_sqlite3.connect_db_file(usage_db_file, mode='write')
+
+                if result != 'passed':
+                    continue
+
+                usage_table_list = common_sqlite3.get_sql_table_list(usage_db_file, usage_db_conn)
+
+                out_events = [e for e in events_by_vendor_feature[vendor_daemon] if e['event_type'] == 'OUT']
+                in_events = [e for e in events_by_vendor_feature[vendor_daemon] if e['event_type'] == 'IN']
+
+                for out_event in out_events:
+                    feature = out_event['feature']
+
+                    if feature not in usage_table_list:
+                        continue
+
+                    start_second = out_event['timestamp_second']
+                    start_time = out_event['timestamp_str']
+                    sample_second = start_second
+                    sample_time = datetime.datetime.fromtimestamp(start_second).strftime('%Y%m%d_%H%M%S')
+                    lic_num = out_event['lic_num']
+
+                    select_condition = (
+                        "WHERE server='" + str(license_server) + "'"
+                        " AND feature='" + str(feature) + "'"
+                        " AND user='" + str(out_event['user']) + "'"
+                        " AND execute_host='" + str(out_event['host']) + "'"
+                        " AND num='" + str(lic_num) + "'"
+                        " AND start_second='" + str(start_second) + "'"
+                    )
+                    existing = common_sqlite3.get_sql_table_data(usage_db_file, usage_db_conn, feature, ['id'], select_condition)
+
+                    if existing:
+                        continue
+
+                    lmstat_match_condition = (
+                        "WHERE server='" + str(license_server) + "'"
+                        " AND feature='" + str(feature) + "'"
+                        " AND user='" + str(out_event['user']) + "'"
+                        " AND execute_host='" + str(out_event['host']) + "'"
+                    )
+                    lmstat_rows = common_sqlite3.get_sql_table_data(usage_db_file, usage_db_conn, feature, ['id', 'start_second'], lmstat_match_condition)
+
+                    if lmstat_rows and lmstat_rows['id']:
+                        for (i, row_start_second) in enumerate(lmstat_rows['start_second']):
+                            try:
+                                row_start = int(row_start_second)
+                            except Exception:
+                                row_start = 0
+
+                            if abs(row_start - start_second) < 3600:
+                                break
+                        else:
+                            value_list = ['NULL', sample_second, sample_time, license_server, vendor_daemon, feature,
+                                          out_event['user'], 'N/A', out_event['host'], lic_num, 'N/A',
+                                          start_second, start_time]
+                            value_string = common_sqlite3.gen_sql_table_value_string(value_list, autoincrement=True)
+                            common_sqlite3.insert_into_sql_table(usage_db_file, usage_db_conn, feature, value_string, commit=False)
+                    else:
+                        value_list = ['NULL', sample_second, sample_time, license_server, vendor_daemon, feature,
+                                      out_event['user'], 'N/A', out_event['host'], lic_num, 'N/A',
+                                      start_second, start_time]
+                        value_string = common_sqlite3.gen_sql_table_value_string(value_list, autoincrement=True)
+                        common_sqlite3.insert_into_sql_table(usage_db_file, usage_db_conn, feature, value_string, commit=False)
+
+                for in_event in in_events:
+                    feature = in_event['feature']
+
+                    if feature not in usage_table_list:
+                        continue
+
+                    in_second = in_event['timestamp_second']
+                    in_time_str = datetime.datetime.fromtimestamp(in_second).strftime('%Y%m%d_%H%M%S')
+
+                    select_condition = (
+                        "WHERE server='" + str(license_server) + "'"
+                        " AND feature='" + str(feature) + "'"
+                        " AND user='" + str(in_event['user']) + "'"
+                        " AND execute_host='" + str(in_event['host']) + "'"
+                    )
+                    existing = common_sqlite3.get_sql_table_data(
+                        usage_db_file, usage_db_conn, feature,
+                        ['id', 'start_second', 'sample_second', 'start_time'],
+                        select_condition,
+                    )
+
+                    if not existing or not existing['id']:
+                        continue
+
+                    best_row_id = None
+                    best_diff = None
+
+                    for (i, start_second_val) in enumerate(existing['start_second']):
+                        try:
+                            start_sec = int(start_second_val)
+                            sample_sec = int(existing['sample_second'][i])
+                        except Exception:
+                            continue
+
+                        if in_second < start_sec:
+                            continue
+
+                        if sample_sec > in_second:
+                            continue
+
+                        diff = in_second - start_sec
+
+                        if (best_diff is None) or (diff < best_diff):
+                            best_diff = diff
+                            best_row_id = existing['id'][i]
+
+                    if best_row_id is not None:
+                        set_condition = (
+                            "SET sample_second='" + str(in_second) + "',"
+                            " sample_time='" + str(in_time_str) + "'"
+                        )
+                        where_condition = "WHERE id='" + str(best_row_id) + "'"
+                        common_sqlite3.update_sql_table_data(usage_db_file, usage_db_conn, feature, set_condition, where_condition, commit=False)
+
+                usage_db_conn.commit()
+                usage_db_conn.close()
+
+    def integrate_log_events_into_utilization_db(self):
+        """
+        Rebuild utilization curve gaps using log OUT/IN events.
+
+        Strategy:
+          1. For each feature, collect all utilization.db snapshot points.
+          2. Merge them with OUT/IN events into a single time-ordered timeline.
+          3. Walk the timeline to maintain the correct in_use count.
+          4. Insert a snapshot into utilization.db for every event time that
+             is not already covered by an lmstat snapshot.
+             (sample_second is PRIMARY KEY so duplicates are silently ignored
+              by INSERT OR IGNORE.)
+
+        This fills in gaps where sessions started and ended entirely between
+        two lmstat polls - those gaps previously left zero points on the curve.
+        """
+        if not self.log_events_dic:
+            return
+
+        print('>>> Integrating license log events into utilization db ...')
+
+        for license_server in self.license_dic.keys():
+            if license_server not in self.log_events_dic:
+                continue
+
+            events = self.log_events_dic[license_server]
+            if not events:
+                continue
+
+            events_by_vendor_feature = {}
+            for event in events:
+                vendor_daemon = self.find_vendor_for_feature(license_server, event['feature'])
+
+                if vendor_daemon:
+                    events_by_vendor_feature.setdefault(vendor_daemon, {}).setdefault(event['feature'], []).append(event)
+
+            for vendor_daemon in events_by_vendor_feature.keys():
+                db_path = str(config.db_path) + '/license_server/' + str(license_server) + '/' + str(vendor_daemon)
+                utilization_db_file = str(db_path) + '/utilization.db'
+
+                if not os.path.exists(utilization_db_file):
+                    continue
+
+                (result, util_conn) = common_sqlite3.connect_db_file(utilization_db_file, mode='write')
+
+                if result != 'passed':
+                    continue
+
+                util_table_list = common_sqlite3.get_sql_table_list(utilization_db_file, util_conn)
+
+                for feature, feature_events in events_by_vendor_feature[vendor_daemon].items():
+                    if feature not in util_table_list:
+                        continue
+
+                    feature_events.sort(key=lambda e: e['timestamp_second'])
+
+                    existing_data = common_sqlite3.get_sql_table_data(
+                        utilization_db_file, util_conn, feature,
+                        ['sample_second', 'issued', 'in_use', 'utilization'],
+                    )
+
+                    existing_snapshots = {}
+                    if existing_data and existing_data['sample_second']:
+                        for (i, ss) in enumerate(existing_data['sample_second']):
+                            try:
+                                sec = int(ss)
+                                existing_snapshots[sec] = {
+                                    'issued': existing_data['issued'][i],
+                                    'in_use': int(existing_data['in_use'][i]),
+                                    'utilization': existing_data['utilization'][i],
+                                }
+                            except Exception:
+                                continue
+
+                    issued_anchor = ''
+                    for sec in sorted(existing_snapshots.keys()):
+                        issued_anchor = existing_snapshots[sec]['issued']
+                        if issued_anchor and issued_anchor != '':
+                            break
+
+                    if not issued_anchor:
+                        continue
+
+                    for event in feature_events:
+                        ts = event['timestamp_second']
+
+                        if ts in existing_snapshots:
+                            continue
+
+                        if event['event_type'] == 'OUT':
+                            lic_num = int(event['lic_num']) if re.match(r'^\d+$', str(event['lic_num'])) else 1
+                            prev_sec = None
+                            for sec in sorted(existing_snapshots.keys()):
+                                if sec <= ts:
+                                    prev_sec = sec
+                                else:
+                                    break
+
+                            if prev_sec is None:
+                                base_in_use = 0
+                            else:
+                                base_in_use = existing_snapshots[prev_sec]['in_use']
+
+                            new_in_use = base_in_use + lic_num
+                        elif event['event_type'] == 'IN':
+                            prev_sec = None
+                            for sec in sorted(existing_snapshots.keys()):
+                                if sec <= ts:
+                                    prev_sec = sec
+                                else:
+                                    break
+
+                            if prev_sec is None:
+                                lic_num = 1
+                                new_in_use = 0
+                            else:
+                                lic_num = 1
+                                new_in_use = max(0, existing_snapshots[prev_sec]['in_use'] - lic_num)
+                        else:
+                            continue
+
+                        if issued_anchor == 'Uncounted':
+                            new_utilization = 'Uncounted'
+                        else:
+                            try:
+                                issued_int = int(issued_anchor)
+                                new_utilization = round(100 * new_in_use / issued_int, 1) if issued_int > 0 else 0.0
+                            except Exception:
+                                new_utilization = 0.0
+
+                        sample_time = datetime.datetime.fromtimestamp(ts).strftime('%Y%m%d_%H%M%S')
+                        value_list = [ts, sample_time, issued_anchor, new_in_use, new_utilization]
+                        value_string = common_sqlite3.gen_sql_table_value_string(value_list)
+                        common_sqlite3.insert_into_sql_table(utilization_db_file, util_conn, feature, value_string, commit=False)
+
+                        existing_snapshots[ts] = {
+                            'issued': issued_anchor,
+                            'in_use': new_in_use,
+                            'utilization': new_utilization,
+                        }
+
+                util_conn.commit()
+                util_conn.close()
+
+    def find_vendor_for_feature(self, license_server, feature):
+        """
+        Find which vendor_daemon serves the given feature on specified license_server.
+        """
+        if license_server not in self.license_dic:
+            return None
+
+        for vendor_daemon in self.license_dic[license_server]['vendor_daemon'].keys():
+            if feature in self.license_dic[license_server]['vendor_daemon'][vendor_daemon]['feature']:
+                return vendor_daemon
+
+        return None
+
     def sampling(self):
         if hasattr(config, 'db_path') and config.db_path:
             if self.usage_sampling:
@@ -478,6 +828,13 @@ class Sampling:
                 p.start()
 
             p.join()
+
+            if self.log_events_dic:
+                if self.usage_sampling:
+                    self.integrate_log_events_into_usage_db()
+
+                if self.utilization_sampling:
+                    self.integrate_log_events_into_utilization_db()
         else:
             common.bprint('No "db_path" is specified on config/config.py.', level='Error')
             sys.exit(1)
