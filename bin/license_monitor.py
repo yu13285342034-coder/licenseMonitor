@@ -11,7 +11,7 @@ import datetime
 import argparse
 import qdarkstyle
 
-from PyQt5.QtWidgets import QApplication, QWidget, QMainWindow, QAction, qApp, QTabWidget, QFrame, QGridLayout, QTableWidget, QTableWidgetItem, QPushButton, QLabel, QMessageBox, QLineEdit, QComboBox, QHeaderView, QDateEdit, QFileDialog, QMenu
+from PyQt5.QtWidgets import QApplication, QWidget, QMainWindow, QAction, qApp, QTabWidget, QFrame, QGridLayout, QTableWidget, QTableWidgetItem, QPushButton, QLabel, QMessageBox, QLineEdit, QComboBox, QHeaderView, QDateEdit, QFileDialog, QMenu, QCheckBox
 from PyQt5.QtGui import QIcon, QBrush, QFont
 from PyQt5.QtCore import Qt, QThread, QDate
 
@@ -1859,6 +1859,31 @@ licenseMonitor is an open source software for EDA software license information d
         curve_tab_frame0_grid.addWidget(curve_tab_empty_label, 1, 4, 1, 2)
         curve_tab_frame0_grid.addWidget(curve_tab_export_button, 1, 6)
 
+        curve_tab_work_start_label = QLabel('Work_Start', self.curve_tab_frame0)
+        curve_tab_work_start_label.setStyleSheet("font-weight: bold;")
+        curve_tab_work_start_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.curve_tab_work_start_edit = QLineEdit('9', self.curve_tab_frame0)
+        self.curve_tab_work_start_edit.setPlaceholderText('9 or 9.5')
+        self.curve_tab_work_start_edit.setFixedWidth(55)
+
+        curve_tab_work_end_label = QLabel('Work_End', self.curve_tab_frame0)
+        curve_tab_work_end_label.setStyleSheet("font-weight: bold;")
+        curve_tab_work_end_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.curve_tab_work_end_edit = QLineEdit('18', self.curve_tab_frame0)
+        self.curve_tab_work_end_edit.setPlaceholderText('18 or 18.5')
+        self.curve_tab_work_end_edit.setFixedWidth(55)
+
+        curve_tab_frame0_grid.addWidget(curve_tab_work_start_label, 2, 0)
+        curve_tab_frame0_grid.addWidget(self.curve_tab_work_start_edit, 2, 1)
+        curve_tab_frame0_grid.addWidget(curve_tab_work_end_label, 2, 2)
+        curve_tab_frame0_grid.addWidget(self.curve_tab_work_end_edit, 2, 3)
+
+        self.curve_tab_workday_checkbox = QCheckBox('Only Workdays', self.curve_tab_frame0)
+        self.curve_tab_workday_checkbox.setChecked(True)
+        curve_tab_frame0_grid.addWidget(self.curve_tab_workday_checkbox, 2, 4, 1, 2)
+
         curve_tab_frame0_grid.setColumnStretch(1, 1)
         curve_tab_frame0_grid.setColumnStretch(2, 1)
         curve_tab_frame0_grid.setColumnStretch(3, 1)
@@ -2134,11 +2159,53 @@ licenseMonitor is an open source software for EDA software license information d
             fig = self.curve_tab_canvas.figure
             fig.set_facecolor('#19232d')
 
+        # self.curve_tab_frame1 - Stats toggle button
+        self.curve_tab_stats_toggle_button = QPushButton('▼ Stats', self.curve_tab_frame1)
+        self.curve_tab_stats_toggle_button.setCheckable(True)
+        self.curve_tab_stats_toggle_button.setChecked(True)
+        self.curve_tab_stats_toggle_button.setMaximumHeight(20)
+        self.curve_tab_stats_toggle_button.setCursor(Qt.PointingHandCursor)
+        self.curve_tab_stats_toggle_button.setStyleSheet('''
+            QPushButton { border: none; text-align: left; padding: 0 6px; font-size: 11px; color: #666; }
+            QPushButton:hover { color: #0078d7; }
+        ''')
+        self.curve_tab_stats_toggle_button.clicked.connect(self.func_curve_tab_stats_toggle)
+
+        # self.curve_tab_frame1 - Stats panel
+        self.curve_tab_stats_frame = QFrame(self.curve_tab_frame1)
+        if self.dark_mode:
+            self.curve_tab_stats_frame.setStyleSheet('QFrame { background-color: #19232d; border: 1px solid #3a4a5a; border-radius: 4px; } QLabel { color: #e0e0e0; }')
+        self.curve_tab_stats_label = QLabel('', self.curve_tab_stats_frame)
+        self.curve_tab_stats_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.curve_tab_stats_label.setWordWrap(True)
+        self.curve_tab_stats_label.setStyleSheet('font-family: Consolas, "Courier New", monospace; font-size: 12px; padding: 6px;')
+        curve_tab_stats_grid = QGridLayout()
+        curve_tab_stats_grid.addWidget(self.curve_tab_stats_label, 0, 0)
+        curve_tab_stats_grid.setContentsMargins(2, 2, 2, 2)
+        self.curve_tab_stats_frame.setLayout(curve_tab_stats_grid)
+
         # self.curve_tab_frame1 - Grid
         curve_tab_frame1_grid = QGridLayout()
         curve_tab_frame1_grid.addWidget(self.curve_tab_toolbar, 0, 0)
         curve_tab_frame1_grid.addWidget(self.curve_tab_canvas, 1, 0)
+        curve_tab_frame1_grid.addWidget(self.curve_tab_stats_toggle_button, 2, 0)
+        curve_tab_frame1_grid.addWidget(self.curve_tab_stats_frame, 3, 0)
+        curve_tab_frame1_grid.setRowStretch(0, 0)
+        curve_tab_frame1_grid.setRowStretch(1, 1)
+        curve_tab_frame1_grid.setRowStretch(2, 0)
+        curve_tab_frame1_grid.setRowStretch(3, 0)
         self.curve_tab_frame1.setLayout(curve_tab_frame1_grid)
+
+    def func_curve_tab_stats_toggle(self):
+        """
+        Toggle curve_tab_stats_frame visibility.
+        """
+        if self.curve_tab_stats_toggle_button.isChecked():
+            self.curve_tab_stats_toggle_button.setText('▼ Stats')
+            self.curve_tab_stats_frame.show()
+        else:
+            self.curve_tab_stats_toggle_button.setText('▶ Stats')
+            self.curve_tab_stats_frame.hide()
 
     def update_curve_tab_frame1(self, curve_dic={}):
         """
@@ -2174,11 +2241,13 @@ licenseMonitor is an open source software for EDA software license information d
         sample_time_list = list(set(sample_time_list))
         sample_time_list.sort()
 
-        # Get issued/in_use list.
+        # Get issued/in_use list (aggregate per sample_time across all features).
         issued_list = []
         in_use_list = []
 
         for sample_time in sample_time_list:
+            total_issued = 0
+            total_in_use = 0
             for feature in curve_dic.keys():
                 for vendor_daemon in curve_dic[feature].keys():
                     if sample_time in curve_dic[feature][vendor_daemon]['sample_data'].keys():
@@ -2188,8 +2257,14 @@ licenseMonitor is an open source software for EDA software license information d
                         if issued_num == 'Uncounted':
                             issued_num = 0
 
-                        issued_list.append(issued_num)
-                        in_use_list.append(in_use_num)
+                        try:
+                            total_issued += int(issued_num)
+                            total_in_use += int(in_use_num)
+                        except (ValueError, TypeError):
+                            pass
+
+            issued_list.append(total_issued)
+            in_use_list.append(total_in_use)
 
         my_show_message.terminate()
 
@@ -2199,15 +2274,131 @@ licenseMonitor is an open source software for EDA software license information d
                 sample_time_list[i] = datetime.datetime.strptime(sample_time, '%Y%m%d_%H%M%S')
 
             # Draw curve.
-            self.draw_curve_tab_curve(fig, sample_time_list, issued_list, in_use_list)
+            self.draw_curve_tab_curve(fig, sample_time_list, issued_list, in_use_list, len(curve_dic))
 
-    def draw_curve_tab_curve(self, fig, sample_time_list, issued_list, in_use_list):
+    def draw_curve_tab_curve(self, fig, sample_time_list, issued_list, in_use_list, feature_count=1):
         """
         Draw average issued/in_use curve for specified feature(s).
         """
         fig.subplots_adjust(bottom=0.25)
         axes = fig.add_subplot(111)
-        avg_in_use = round((sum(in_use_list)/len(in_use_list)), 1)
+
+        try:
+            work_start = float(self.curve_tab_work_start_edit.text().strip())
+        except (ValueError, AttributeError):
+            work_start = 9.0
+        try:
+            work_end = float(self.curve_tab_work_end_edit.text().strip())
+        except (ValueError, AttributeError):
+            work_end = 18.0
+        workday_only = hasattr(self, 'curve_tab_workday_checkbox') and self.curve_tab_workday_checkbox.isChecked()
+
+        def is_in_work_window(st_obj):
+            st_h = st_obj.hour + st_obj.minute / 60.0
+            if work_start <= work_end:
+                return work_start <= st_h < work_end
+            return st_h >= work_start or st_h < work_end
+
+        def is_workday(st_obj):
+            return st_obj.weekday() < 5
+
+        work_indices = []
+        work_in_use = []
+        all_in_use = []
+        all_issued = []
+
+        for i, st in enumerate(sample_time_list):
+            if hasattr(st, 'hour'):
+                st_obj = st
+            else:
+                st_obj = datetime.datetime.strptime(str(st), '%Y%m%d_%H%M%S')
+
+            all_in_use.append(in_use_list[i])
+            all_issued.append(issued_list[i])
+
+            if is_in_work_window(st_obj) and (not workday_only or is_workday(st_obj)):
+                work_indices.append(i)
+                work_in_use.append(in_use_list[i])
+
+        def calc_stats(values, indices=None):
+            if not values:
+                return {'avg': 'N/A', 'peak': 'N/A', 'peak_time': None, 'min': 'N/A', 'min_time': None, 'count': 0}
+            total = sum(values)
+            peak_val = max(values)
+            min_val = min(values)
+            if indices is not None:
+                peak_global_idx = indices[values.index(peak_val)]
+                min_global_idx = indices[values.index(min_val)]
+            else:
+                peak_global_idx = values.index(peak_val)
+                min_global_idx = values.index(min_val)
+            return {
+                'avg': round(total / len(values), 1),
+                'peak': peak_val,
+                'peak_time': sample_time_list[peak_global_idx],
+                'min': min_val,
+                'min_time': sample_time_list[min_global_idx],
+                'count': len(values),
+            }
+
+        work_stats = calc_stats(work_in_use, work_indices)
+        all_stats = calc_stats(all_in_use)
+
+        try:
+            peak_in_use = max(all_in_use) if all_in_use else 0
+            peak_issued = max(all_issued) if all_issued else 0
+            utilization = round(peak_in_use / peak_issued * 100, 1) if peak_issued > 0 else 'N/A'
+        except (ZeroDivisionError, TypeError):
+            utilization = 'N/A'
+
+        unique_workdays = set()
+        for i in work_indices:
+            if hasattr(sample_time_list[i], 'date'):
+                unique_workdays.add(sample_time_list[i].date())
+
+        if sample_time_list:
+            st_min = sample_time_list[0]
+            st_max = sample_time_list[-1]
+            if hasattr(st_min, 'strftime'):
+                range_str = st_min.strftime('%Y-%m-%d') + '  ~  ' + st_max.strftime('%Y-%m-%d')
+            else:
+                range_str = str(st_min) + '  ~  ' + str(st_max)
+        else:
+            range_str = 'N/A'
+
+        def _fmt_time(t):
+            if hasattr(t, 'strftime'):
+                return t.strftime('%Y-%m-%d %H:%M')
+            return str(t)
+
+        work_start_str = ('%.2g' % work_start) if work_start != int(work_start) else str(int(work_start))
+        work_end_str = ('%.2g' % work_end) if work_end != int(work_end) else str(int(work_end))
+        workday_tag = '  +  Workday' if workday_only else ''
+
+        lines = []
+        lines.append('══════ Work Hours (%s - %s%s) ══════' % (work_start_str, work_end_str, workday_tag))
+        lines.append('  Avg Usage:    %s' % work_stats['avg'])
+        if work_stats['peak'] != 'N/A':
+            lines.append('  Peak Usage:   %s  @  %s' % (work_stats['peak'], _fmt_time(work_stats['peak_time'])))
+        if work_stats['min'] != 'N/A':
+            lines.append('  Valley Usage: %s  @  %s' % (work_stats['min'], _fmt_time(work_stats['min_time'])))
+        lines.append('  Valid Samples: %d points  (%d workdays)' % (work_stats['count'], len(unique_workdays)))
+        lines.append('')
+        lines.append('══════ All Day ══════')
+        lines.append('  Avg Usage:    %s' % all_stats['avg'])
+        if all_stats['peak'] != 'N/A':
+            lines.append('  Peak Usage:   %s  @  %s' % (all_stats['peak'], _fmt_time(all_stats['peak_time'])))
+        lines.append('  Total Samples: %d' % all_stats['count'])
+        lines.append('')
+        lines.append('══════ Overall Metrics ══════')
+        lines.append('  Peak Utilization: %s%%' % utilization)
+        lines.append('  Total License:    %s' % (max(all_issued) if all_issued else 'N/A'))
+        lines.append('  Feature Count:    %d' % feature_count)
+        lines.append('  Data Range:       %s' % range_str)
+
+        stats_html = '<br>'.join(lines)
+        if hasattr(self, 'curve_tab_stats_label'):
+            self.curve_tab_stats_label.setText(stats_html)
 
         if self.dark_mode:
             axes.set_facecolor('#19232d')
@@ -2216,11 +2407,11 @@ licenseMonitor is an open source software for EDA software license information d
                 spine.set_color('white')
 
             axes.tick_params(axis='both', colors='white')
-            axes.set_title('Average Used : ' + str(avg_in_use), color='white')
+            axes.set_title('License Usage Curve', color='white')
             axes.set_xlabel('Sample Time', color='white')
             axes.set_ylabel('Num', color='white')
         else:
-            axes.set_title('Average Used : ' + str(avg_in_use))
+            axes.set_title('License Usage Curve')
             axes.set_xlabel('Sample Time')
             axes.set_ylabel('Num')
 
