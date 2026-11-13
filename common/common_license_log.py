@@ -11,6 +11,7 @@ import os
 import re
 import json
 import time
+import getpass
 import datetime
 
 import yaml
@@ -155,6 +156,93 @@ class LicenseLogParser():
             common.bprint('Failed on loading license log config from "' + str(self.log_config_file) + '".', level='Warning')
             common.bprint(error, color='yellow', display_method=1, indent=9)
             self.log_dic = {}
+
+    def set_log_paths(self, log_paths, override=False):
+        """
+        Add automatically discovered paths.  YAML paths are manual overrides and
+        are therefore preserved unless override=True.
+        """
+        if not isinstance(log_paths, dict):
+            return
+
+        for license_server, log_path in log_paths.items():
+            if (not isinstance(license_server, str)) or (not isinstance(log_path, str)) or (not log_path.strip()):
+                continue
+
+            expanded_path = os.path.expandvars(os.path.expanduser(log_path.strip()))
+
+            if override or (license_server not in self.log_dic):
+                if os.path.isabs(expanded_path):
+                    self.log_dic[license_server] = os.path.normpath(expanded_path)
+                else:
+                    self.log_dic[license_server] = expanded_path
+
+    @staticmethod
+    def discover_license_log_paths(license_server_list, ssh_user=''):
+        """
+        Discover FlexNet manager log paths from running lmgrd processes.
+
+        This uses the same SSH + netstat/ps mechanism as
+        tools/get_license_log.py, but without requiring an intermediate YAML
+        file.  Input and returned keys normally look like "5280@lic_host".
+        """
+        if not isinstance(license_server_list, (list, tuple, set)):
+            return {}
+
+        user_name = str(ssh_user or getpass.getuser())
+        candidates_by_host = {}
+        candidates_with_port = set()
+
+        for license_server in license_server_list:
+            license_server = str(license_server).strip()
+
+            if not license_server:
+                continue
+
+            host_name = license_server.split('@', 1)[1] if '@' in license_server else license_server
+            candidates_by_host.setdefault(host_name, []).append(license_server)
+
+            if re.match(r'^\d+@\S+$', license_server):
+                candidates_with_port.add(license_server)
+
+        discovered_log_dic = {}
+
+        for host_name in sorted(candidates_by_host.keys()):
+            pid_port_dic = {}
+            pid_log_dic = {}
+            port_log_dic = {}
+            command = 'netstat -anp | grep lmgrd ; ps aux | grep lmgrd'
+            stdout_list = common.ssh_client(host_name=host_name, user_name=user_name, command=command, timeout=1)
+
+            for line in stdout_list:
+                netstat_match = re.match(r'^\s*\S+\s+\d+\s+\d+\s+\S+:(\d+)\s+.*\b(ESTABLISHED|LISTEN)\s+(\d+)/lmgrd\s*$', line, re.IGNORECASE)
+                ps_match = re.match(r'^\S+\s+(\d+)\s+.*lmgrd\s+.*-l\s+(\S+).*$', line)
+
+                if netstat_match:
+                    pid_port_dic[netstat_match.group(3)] = netstat_match.group(1)
+                elif ps_match:
+                    pid_log_dic[ps_match.group(1)] = ps_match.group(2)
+
+            for process_id, port in pid_port_dic.items():
+                if process_id not in pid_log_dic:
+                    continue
+
+                port_log_dic[str(port)] = pid_log_dic[process_id]
+                print('    Discovered license.log "' + str(pid_log_dic[process_id]) + '" for ' + str(port) + '@' + str(host_name))
+
+            candidates = candidates_by_host[host_name]
+
+            for port, log_path in port_log_dic.items():
+                preferred_server = str(port) + '@' + str(host_name)
+
+                if preferred_server in candidates:
+                    discovered_log_dic[preferred_server] = log_path
+                elif len(candidates) == 1:
+                    discovered_log_dic[candidates[0]] = log_path
+                else:
+                    discovered_log_dic[preferred_server] = log_path
+
+        return discovered_log_dic
 
     @staticmethod
     def get_file_signature(log_path):

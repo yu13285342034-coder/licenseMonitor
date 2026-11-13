@@ -115,7 +115,7 @@ excluded_license_servers = ""
 # Specify the database directory where to save sample data.
 db_path = "''' + str(db_path) + '''"
 
-# FlexNet license.log mapping, see config/others/license_log.yaml.example.
+# Optional manual license.log overrides; automatic SSH discovery is used first.
 license_log_config_file = "''' + str(license_log_config_file) + '''"
 
 # Specify which are the primary factors when getting project information.

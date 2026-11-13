@@ -121,37 +121,54 @@ class Sampling:
 
     def init_log_parser(self):
         """
-        Initialize incremental license.log parser when log config is available.
+        Discover FlexNet license.log paths automatically and initialize parser.
+
+        config/others/license_log.yaml is optional.  If present, it only
+        overrides paths that SSH process discovery cannot find.
         """
         license_log_config_file = str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/config/others/license_log.yaml'
 
         if hasattr(config, 'license_log_config_file') and config.license_log_config_file:
             license_log_config_file = config.license_log_config_file
 
-        if (not os.path.exists(license_log_config_file)) or (not hasattr(config, 'db_path')) or (not config.db_path):
+        if (not hasattr(config, 'db_path')) or (not config.db_path):
             return
 
-        print('>>> Initializing license log parser ...')
+        print('>>> Discovering license log paths ...')
 
         self.log_parser = common_license_log.LicenseLogParser(
             log_config_file=license_log_config_file,
             db_path=config.db_path,
         )
 
-        if not self.log_parser.log_dic:
-            common.bprint('No license log entries found in "' + str(license_log_config_file) + '". Log parsing will be skipped.', level='Info')
+        license_server_list = []
+        lm_license_file_list = [entry for entry in os.environ.get('LM_LICENSE_FILE', '').split(':') if entry.strip()]
+
+        for license_server in lm_license_file_list:
+            if license_server not in license_server_list:
+                license_server_list.append(license_server)
+
+        discovered_log_dic = self.log_parser.discover_license_log_paths(
+            license_server_list,
+            ssh_user=getattr(config, 'license_log_ssh_user', ''),
+        )
+        self.log_parser.set_log_paths(discovered_log_dic, override=False)
+
+        if self.log_parser.log_dic:
+            for license_server, license_log in sorted(self.log_parser.log_dic.items()):
+                print('    Using license.log "' + str(license_log) + '" for server "' + str(license_server) + '".')
+        else:
+            common.bprint('No license.log was discovered automatically. Log parsing will be skipped.', level='Info')
             self.log_parser = None
             return
 
-        # Migrate readers from the old in-memory/snapshot integration: without
-        # an event database, read the complete retained log once.
+        # Migrate readers from the old snapshot integration: without an event
+        # database, read the complete retained log once.
         if (not os.path.exists(self.get_license_event_db_file())) and self.log_parser.state_dic:
             self.log_parser.state_dic = {}
             self.log_parser.save_state()
 
-        license_server_list = sorted(set(list(self.license_dic.keys()) + list(self.log_parser.log_dic.keys())))
-
-        for license_server in license_server_list:
+        for license_server in sorted(self.log_parser.log_dic.keys()):
             events = self.log_parser.get_log_events(license_server)
 
             if events:

@@ -1,4 +1,5 @@
-# Copy this file to config/others/license_log.yaml and update each path.
-# licenseMonitor reads these FlexNet manager logs incrementally.
+# This file is OPTIONAL.
+# Sampling automatically discovers license.log from each running lmgrd process.
+# Use this YAML only as a manual override when SSH process discovery cannot find it.
 license_logs:
   # "5280@lic_server": "/var/log/lmgrd/license.log"
