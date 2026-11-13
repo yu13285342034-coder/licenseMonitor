@@ -1,90 +1,180 @@
 # -*- coding: utf-8 -*-
+"""
+Parser and persistent reader for FlexNet license manager debug logs.
+
+The license manager log is the authoritative source for OUT/IN events.  lmstat
+output is only a snapshot, so short checkouts can be missed completely between
+two snapshots.  This module reads license.log incrementally and returns every
+OUT/IN event in chronological order.
+"""
 import os
 import re
-import sys
 import json
 import time
 import datetime
+
 import yaml
 
-sys.path.append(os.environ['LICENSE_MONITOR_INSTALL_PATH'])
 from common import common
 
 
+# Time-only FlexNet logs normally print "TIMESTAMP MM/DD/YYYY" once per day.
+TIMESTAMP_LINE_PATTERN = re.compile(
+    r'^\s*(?:\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)?\s*'
+    r'\(\s*lmgrd\s*\)\s+TIMESTAMP\s+'
+    r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}-\d{1,2}-\d{4})',
+    re.IGNORECASE
+)
+
+# Both "09:45:11" and "11/12/2025 09:45:11" are common in vendor-daemon logs.
+EVENT_LINE_PATTERN = re.compile(
+    r'^\s*'
+    r'(?P<timestamp>\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
+    r'|\d{1,2}/\d{1,2}/\d{2,4}[ T]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
+    r'|\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)?'
+    r'\s*\(\s*(?P<vendor>[^)]+)\s*\)\s+'
+    r'(?P<event_type>OUT|IN)\s*:\s*'
+    r'"(?P<feature>[^"]+)"\s+'
+    r'(?P<user>\S+)@(?P<host>\S+)'
+    r'(?P<rest>.*)$',
+    re.IGNORECASE
+)
+
+EVENT_LINE_SPACE_HOST_PATTERN = re.compile(
+    r'^\s*'
+    r'(?P<timestamp>\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
+    r'|\d{1,2}/\d{1,2}/\d{2,4}[ T]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
+    r'|\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)?'
+    r'\s*\(\s*(?P<vendor>[^)]+)\s*\)\s+'
+    r'(?P<event_type>OUT|IN)\s*:\s*'
+    r'"(?P<feature>[^"]+)"\s+'
+    r'(?P<user>\S+)\s+(?P<host>\S+)'
+    r'(?P<rest>.*)$',
+    re.IGNORECASE
+)
+
+COUNT_PATTERN = re.compile(
+    r'(?:lic(?:ense)?(?:[_ -]*num(?:ber)?)?|pcount|count)\s*[:=]\s*(\d+)',
+    re.IGNORECASE
+)
+
+
 class LicenseLogParser():
-    """
-    Incrementally parse FlexNet license debug log files.
-    Tracks file position across runs so only new lines are processed each time.
-    """
+    """Incrementally parse FlexNet license debug logs."""
 
     def __init__(self, log_config_file='', db_path=''):
         self.log_config_file = log_config_file
         self.db_path = db_path
-        self.state_file = str(db_path) + '/license_log_state.json' if db_path else ''
+        self.state_file = os.path.join(str(db_path), 'license_log_state.json') if db_path else ''
         self.log_dic = {}
         self.state_dic = {}
+        self.pending_state_dic = {}
 
         self.load_state()
         self.load_log_config()
 
     def load_state(self):
-        """
-        Load saved file offsets from previous run.
-        """
+        """Load file offsets and rotation signatures saved by a previous run."""
         if self.state_file and os.path.exists(self.state_file):
             try:
-                with open(self.state_file, 'r') as SF:
-                    self.state_dic = json.load(SF)
+                with open(self.state_file, 'r', encoding='utf-8') as state_file:
+                    loaded_state = json.load(state_file)
+
+                if isinstance(loaded_state, dict):
+                    self.state_dic = loaded_state
             except Exception as error:
                 common.bprint('Failed on loading license log state from "' + str(self.state_file) + '".', level='Warning')
                 common.bprint(error, color='yellow', display_method=1, indent=9)
                 self.state_dic = {}
 
     def save_state(self):
-        """
-        Save current file offsets for next run.
-        """
-        if self.state_file:
-            state_dir = os.path.dirname(self.state_file)
+        """Persist committed offsets after events have been inserted into event db."""
+        if not self.state_file:
+            return
 
-            if state_dir and (not os.path.exists(state_dir)):
-                try:
-                    os.makedirs(state_dir, mode=0o755)
-                except Exception as error:
-                    common.bprint('Failed on creating directory "' + str(state_dir) + '" for license log state.', level='Warning')
-                    return
+        state_dir = os.path.dirname(os.path.abspath(self.state_file))
 
+        if state_dir and (not os.path.exists(state_dir)):
             try:
-                with open(self.state_file, 'w') as SF:
-                    json.dump(self.state_dic, SF, indent=2)
+                os.makedirs(state_dir, exist_ok=True)
             except Exception as error:
-                common.bprint('Failed on saving license log state to "' + str(self.state_file) + '".', level='Warning')
+                common.bprint('Failed on creating directory "' + str(state_dir) + '" for license log state.', level='Error')
+                common.bprint(error, color='red', display_method=1, indent=9)
+                return
+
+        try:
+            temporary_state_file = str(self.state_file) + '.tmp'
+
+            with open(temporary_state_file, 'w', encoding='utf-8') as state_file:
+                json.dump(self.state_dic, state_file, indent=2, sort_keys=True)
+
+            os.replace(temporary_state_file, self.state_file)
+        except Exception as error:
+            common.bprint('Failed on saving license log state to "' + str(self.state_file) + '".', level='Warning')
+            common.bprint(error, color='yellow', display_method=1, indent=9)
 
     def load_log_config(self):
         """
-        Load license log path mapping from yaml config file.
-        Config format: {license_server: license_log_path}
+        Load license log paths.
+
+        Both formats generated by tools/get_license_log.py and a friendlier
+        nested format are supported:
+
+            "5280@lic_server": "/var/log/license.log"
+            license_logs:
+              "5280@lic_server": "/var/log/license.log"
         """
-        if self.log_config_file and os.path.exists(self.log_config_file):
-            try:
-                with open(self.log_config_file, 'r') as LCF:
-                    self.log_dic = yaml.load(LCF, Loader=yaml.FullLoader)
-            except Exception as error:
-                common.bprint('Failed on loading license log config from "' + str(self.log_config_file) + '".', level='Warning')
-                common.bprint(error, color='yellow', display_method=1, indent=9)
-                self.log_dic = {}
+        if (not self.log_config_file) or (not os.path.exists(self.log_config_file)):
+            return
+
+        try:
+            with open(self.log_config_file, 'r', encoding='utf-8') as log_config_file:
+                config_data = yaml.safe_load(log_config_file)
+
+            if isinstance(config_data, dict):
+                log_config = config_data.get('license_logs', config_data)
+            else:
+                log_config = {}
+
+            if not isinstance(log_config, dict):
+                common.bprint('Invalid license log config "' + str(self.log_config_file) + '": root must be a mapping.', level='Warning')
+                return
+
+            for license_server, log_path in log_config.items():
+                if isinstance(log_path, dict):
+                    log_path = log_path.get('path', '')
+
+                if isinstance(license_server, str) and isinstance(log_path, str) and log_path.strip():
+                    expanded_path = os.path.expandvars(os.path.expanduser(log_path.strip()))
+
+                    if os.path.isabs(expanded_path):
+                        self.log_dic[license_server.strip()] = os.path.normpath(expanded_path)
+                    else:
+                        self.log_dic[license_server.strip()] = expanded_path
+        except Exception as error:
+            common.bprint('Failed on loading license log config from "' + str(self.log_config_file) + '".', level='Warning')
+            common.bprint(error, color='yellow', display_method=1, indent=9)
+            self.log_dic = {}
+
+    @staticmethod
+    def get_file_signature(log_path):
+        """Return a stable signature used to detect log replacement/rotation."""
+        signature = ''
+
+        try:
+            with open(log_path, 'rb') as log_file:
+                signature = str(log_file.read(4096))
+        except Exception:
+            signature = ''
+
+        return signature
 
     def get_log_events(self, license_server):
         """
-        Parse new lines from the license log for specified license_server.
-        Return a list of event dicts, each with keys:
-          - timestamp_second: unix timestamp (int)
-          - timestamp_str:    original timestamp string from log
-          - event_type:       'OUT' (checkout) or 'IN' (checkin)
-          - feature:          feature name
-          - user:             user name
-          - host:             execute host
-          - lic_num:          number of licenses (default 1)
+        Read only new complete lines for one server.
+
+        Returned events are held in pending_state_dic until commit_log_state()
+        is called.  Therefore a SQLite failure cannot silently lose events.
         """
         event_list = []
 
@@ -97,120 +187,234 @@ class LicenseLogParser():
             common.bprint('License log file "' + str(log_path) + '" does not exist for server "' + str(license_server) + '".', level='Warning')
             return event_list
 
-        current_size = os.path.getsize(log_path)
-        last_offset = self.state_dic.get(log_path, {}).get('offset', 0) if self.state_dic else 0
-
-        if current_size < last_offset:
-            common.bprint('License log "' + str(log_path) + '" appears to have been rotated (size=' + str(current_size) + ' < offset=' + str(last_offset) + '). Will read from beginning.', level='Info')
-            last_offset = 0
-
         try:
-            with open(log_path, 'r', errors='ignore') as LF:
-                LF.seek(last_offset)
-                new_content = LF.read()
-                new_offset = LF.tell()
+            current_size = os.path.getsize(log_path)
+            current_signature = self.get_file_signature(log_path)
+            saved_state = self.state_dic.get(log_path, {})
+            last_offset = int(saved_state.get('offset', 0))
+            saved_signature = str(saved_state.get('signature', ''))
+
+            if current_size < last_offset or (saved_signature and (current_signature != saved_signature)):
+                common.bprint(
+                    'License log "' + str(log_path) + '" was rotated or replaced; reading it from the beginning.',
+                    level='Info'
+                )
+                last_offset = 0
+
+            with open(log_path, 'rb') as log_file:
+                log_file.seek(last_offset)
+                new_bytes = log_file.read()
+
+            # Never consume an incomplete final line.  It will be completed and
+            # picked up by the next sampling run.
+            complete_length = new_bytes.rfind(b'\n') + 1
+            if complete_length <= 0:
+                return event_list
+
+            new_content = new_bytes[:complete_length].decode('utf-8', errors='ignore')
+            event_list = self.parse_log_content(new_content)
+            new_offset = last_offset + complete_length
+
+            for event in event_list:
+                event['license_server'] = license_server
+
+            self.pending_state_dic[log_path] = {
+                'offset': new_offset,
+                'size': current_size,
+                'signature': current_signature,
+                'updated_second': int(time.time()),
+            }
         except Exception as error:
             common.bprint('Failed on reading license log "' + str(log_path) + '".', level='Warning')
             common.bprint(error, color='yellow', display_method=1, indent=9)
-            return event_list
-
-        for line in new_content.split('\n'):
-            event = self.parse_log_line(line.strip())
-
-            if event:
-                event['license_server'] = license_server
-                event_list.append(event)
-
-        self.state_dic.setdefault(log_path, {})
-        self.state_dic[log_path]['offset'] = new_offset
-        self.save_state()
+            return []
 
         return event_list
 
-    def parse_log_line(self, line):
-        """
-        Parse a single license log line, return event dict or None.
-        Handles common FlexNet log formats:
-          09:45:11 (vendor) OUT: "feature" user@host
-          11/12/2025 09:45:11 (vendor) OUT: "feature" user@host
-          09:45:11 (vendor) OUT: "feature" user@host  (LICENSE pcount: 3)
-          09:45:11 (vendor) IN: "feature" user@host
-          09:45:11 (vendor) IN: "feature" user@host  (delay: 1234)
-        """
-        if not line:
-            return None
+    def commit_log_state(self):
+        """Commit offsets for all logs successfully read in this run."""
+        if not self.pending_state_dic:
+            return
 
-        out_pattern = re.compile(
-            r'^(\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2}:\d{2})\s+'
-            r'\(\S+\)\s+'
-            r'OUT:\s+"([^"]+)"\s+'
-            r'(\S+)@(\S+)'
+        for log_path, state in self.pending_state_dic.items():
+            self.state_dic[log_path] = state
+
+        self.save_state()
+        self.pending_state_dic = {}
+
+    @staticmethod
+    def parse_date_string(date_string):
+        """Parse FlexNet date strings; ambiguous slash dates use MM/DD/YYYY."""
+        date_formats = ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d', '%Y/%m/%d', '%m-%d-%Y')
+
+        for date_format in date_formats:
+            try:
+                return datetime.datetime.strptime(date_string, date_format).date()
+            except ValueError:
+                continue
+
+        return None
+
+    @classmethod
+    def parse_exact_timestamp(cls, timestamp_string):
+        """Convert a timestamp containing a date into a datetime object."""
+        timestamp_formats = (
+            '%Y-%m-%d %H:%M:%S.%f',
+            '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%dT%H:%M:%S.%f',
+            '%Y-%m-%dT%H:%M:%S',
+            '%m/%d/%Y %H:%M:%S.%f',
+            '%m/%d/%Y %H:%M:%S',
+            '%m/%d/%y %H:%M:%S.%f',
+            '%m/%d/%y %H:%M:%S',
         )
-        pcount_pattern = re.compile(r'LICENSE\s+pcount:\s*(\d+)')
-        in_pattern = re.compile(
-            r'^(\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2}:\d{2})\s+'
-            r'\(\S+\)\s+'
-            r'IN:\s+"([^"]+)"\s+'
-            r'(\S+)@(\S+)'
-        )
 
-        my_match = out_pattern.match(line)
-        if my_match:
-            timestamp_str = my_match.group(1)
-            feature = my_match.group(2)
-            user = my_match.group(3)
-            host = my_match.group(4)
-            pcount_match = pcount_pattern.search(line)
-            lic_num = pcount_match.group(1) if pcount_match else '1'
-            event_type = 'OUT'
-        else:
-            my_match = in_pattern.match(line)
-            if not my_match:
-                return None
+        for timestamp_format in timestamp_formats:
+            try:
+                return datetime.datetime.strptime(timestamp_string, timestamp_format)
+            except ValueError:
+                continue
 
-            timestamp_str = my_match.group(1)
-            feature = my_match.group(2)
-            user = my_match.group(3)
-            host = my_match.group(4)
-            lic_num = '1'
-            event_type = 'IN'
+        date_part = timestamp_string.split()[0]
+        time_part = timestamp_string.split()[1]
+        parsed_date = cls.parse_date_string(date_part)
 
-        timestamp_second = self.convert_log_timestamp(timestamp_str)
-        if timestamp_second is None:
-            return None
+        if parsed_date:
+            try:
+                parsed_time = datetime.datetime.strptime(time_part, '%H:%M:%S.%f').time()
+                return datetime.datetime.combine(parsed_date, parsed_time)
+            except ValueError:
+                pass
 
-        return {
-            'timestamp_second': timestamp_second,
-            'timestamp_str': timestamp_str,
-            'event_type': event_type,
-            'feature': feature,
-            'user': user,
-            'host': host,
-            'lic_num': lic_num,
-        }
+        return None
 
-    def convert_log_timestamp(self, timestamp_str):
+    @classmethod
+    def parse_log_content(cls, content, reference_now=None):
         """
-        Convert license log timestamp string to unix timestamp (seconds).
-        Supports two common formats:
-          - "09:45:11"           (no date, assume today)
-          - "11/12/2025 09:45:11"  (with MM/DD/YYYY date)
+        Parse a complete chunk and infer dates for time-only FlexNet lines.
+
+        FlexNet logs commonly contain only HH:MM:SS.  A daily TIMESTAMP line and
+        backwards time jumps are used to reconstruct the correct day, instead of
+        incorrectly mapping every historical event to today.
         """
-        now = datetime.datetime.now()
+        now = reference_now or datetime.datetime.now()
+        current_date = now.date()
+        saw_time = False
+        last_time_of_day = None
+        event_list = []
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+
+            timestamp_match = TIMESTAMP_LINE_PATTERN.match(line)
+            if timestamp_match:
+                parsed_date = cls.parse_date_string(timestamp_match.group(1))
+
+                if parsed_date:
+                    current_date = parsed_date
+                    saw_time = True
+                    last_time_of_day = None
+                continue
+
+            match = EVENT_LINE_PATTERN.match(line)
+
+            if not match:
+                match = EVENT_LINE_SPACE_HOST_PATTERN.match(line)
+
+            if not match:
+                continue
+
+            timestamp_string = match.group('timestamp') or ''
+            exact_datetime = cls.parse_exact_timestamp(timestamp_string) if timestamp_string and (' ' in timestamp_string or 'T' in timestamp_string) else None
+
+            if exact_datetime:
+                current_date = exact_datetime.date()
+                event_datetime = exact_datetime
+                last_time_of_day = event_datetime.time()
+            else:
+                try:
+                    parsed_time = datetime.datetime.strptime(timestamp_string, '%H:%M:%S.%f')
+                except ValueError:
+                    try:
+                        parsed_time = datetime.datetime.strptime(timestamp_string, '%H:%M:%S')
+                    except ValueError:
+                        continue
+
+                parsed_time = parsed_time.time()
+
+                # Time-only FlexNet logs omit the date.  A backward time value
+                # means the log crossed midnight.
+                if (last_time_of_day is not None) and (parsed_time < last_time_of_day):
+                    current_date = current_date + datetime.timedelta(days=1)
+
+                candidate = datetime.datetime.combine(current_date, parsed_time)
+
+                if not saw_time and (candidate > now + datetime.timedelta(minutes=5)):
+                    current_date = current_date - datetime.timedelta(days=1)
+                    candidate = datetime.datetime.combine(current_date, parsed_time)
+
+                event_datetime = candidate
+                last_time_of_day = parsed_time
+                saw_time = True
+
+            lic_num = cls.parse_license_count(match.group('rest'))
+            event_list.append({
+                'timestamp_second': int(time.mktime(event_datetime.timetuple())),
+                'timestamp_str': timestamp_string,
+                'event_type': match.group('event_type').upper(),
+                'vendor': match.group('vendor').strip(),
+                'feature': match.group('feature').strip(),
+                'user': match.group('user').strip(),
+                'host': match.group('host').strip(' .,;'),
+                'lic_num': lic_num,
+                'raw_line': line,
+            })
+
+        return event_list
+
+    @staticmethod
+    def parse_license_count(rest_string):
+        """
+        Extract checkout/checkin count.
+
+        Formats handled include "(LICENSE pcount: 3)", "(Lic_num: 2)",
+        and "licenses=2".  FlexNet logs without an explicit count consume one
+        license; unrelated numeric handles are not treated as counts.
+        """
+        if rest_string:
+            count_match = COUNT_PATTERN.search(rest_string)
+
+            if count_match:
+                return str(max(1, int(count_match.group(1))))
+
+            return '1'
+
+        return '1'
+
+    @staticmethod
+    def convert_log_timestamp(timestamp_string, reference_now=None):
+        """Compatibility helper used by reporting tools."""
+        parser = LicenseLogParser()
+        exact_datetime = parser.parse_exact_timestamp(timestamp_string)
+
+        if exact_datetime:
+            return int(time.mktime(exact_datetime.timetuple()))
+
+        now = reference_now or datetime.datetime.now()
 
         try:
-            if re.match(r'^\d{1,2}:\d{2}:\d{2}$', timestamp_str):
-                ts = datetime.datetime.strptime(timestamp_str, '%H:%M:%S')
-                full_dt = now.replace(hour=ts.hour, minute=ts.minute, second=ts.second, microsecond=0)
-
-                if full_dt > now + datetime.timedelta(minutes=5):
-                    full_dt = full_dt - datetime.timedelta(days=1)
-
-                return int(time.mktime(full_dt.timetuple()))
-            elif re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}:\d{2}$', timestamp_str):
-                ts = datetime.datetime.strptime(timestamp_str, '%m/%d/%Y %H:%M:%S')
-                return int(time.mktime(ts.timetuple()))
-            else:
-                return None
-        except Exception:
+            parsed_time = datetime.datetime.strptime(timestamp_string, '%H:%M:%S')
+            full_datetime = now.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=parsed_time.second, microsecond=0)
+        except ValueError:
             return None
+
+        if full_datetime > now + datetime.timedelta(minutes=5):
+            full_datetime = full_datetime - datetime.timedelta(days=1)
+
+        return int(time.mktime(full_datetime.timetuple()))
+
+    def parse_log_line(self, line):
+        """Parse one line when its date is already known or embeds a date."""
+        events = self.parse_log_content(line)
+
+        return events[0] if events else None

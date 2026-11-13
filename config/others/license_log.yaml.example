@@ -1,0 +1,4 @@
+# Copy this file to config/others/license_log.yaml and update each path.
+# licenseMonitor reads these FlexNet manager logs incrementally.
+license_logs:
+  # "5280@lic_server": "/var/log/lmgrd/license.log"

@@ -76,6 +76,7 @@ def gen_config_file():
     config_file = str(CWD) + '/config/config.py'
     lmstat_path = str(CWD) + '/tools/lmstat'
     db_path = str(CWD) + '/db'
+    license_log_config_file = str(CWD) + '/config/others/license_log.yaml'
     lm_license_file = str(CWD) + '/config/LM_LICENSE_FILE'
     product_feature_file = str(CWD) + '/config/others/product_feature.yaml'
     project_list_file = str(CWD) + '/config/project/project_list'
@@ -113,6 +114,9 @@ excluded_license_servers = ""
 
 # Specify the database directory where to save sample data.
 db_path = "''' + str(db_path) + '''"
+
+# FlexNet license.log mapping, see config/others/license_log.yaml.example.
+license_log_config_file = "''' + str(license_log_config_file) + '''"
 
 # Specify which are the primary factors when getting project information.
 # It could be one or serveral items between "user/execute_host/submit_host".
