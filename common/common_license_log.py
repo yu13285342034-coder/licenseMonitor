@@ -11,7 +11,9 @@ import os
 import re
 import json
 import time
+import base64
 import getpass
+import shlex
 import datetime
 
 import yaml
@@ -63,11 +65,13 @@ COUNT_PATTERN = re.compile(
 class LicenseLogParser():
     """Incrementally parse FlexNet license debug logs."""
 
-    def __init__(self, log_config_file='', db_path=''):
+    def __init__(self, log_config_file='', db_path='', ssh_user=''):
         self.log_config_file = log_config_file
+        self.ssh_user = str(ssh_user or '')
         self.db_path = db_path
         self.state_file = os.path.join(str(db_path), 'license_log_state.json') if db_path else ''
         self.log_dic = {}
+        self.remote_dic = {}
         self.state_dic = {}
         self.pending_state_dic = {}
 
@@ -141,21 +145,42 @@ class LicenseLogParser():
                 common.bprint('Invalid license log config "' + str(self.log_config_file) + '": root must be a mapping.', level='Warning')
                 return
 
-            for license_server, log_path in log_config.items():
-                if isinstance(log_path, dict):
-                    log_path = log_path.get('path', '')
+            for license_server, log_info in log_config.items():
+                remote_host = ''
+                remote_user = ''
+
+                if isinstance(log_info, dict):
+                    log_path = log_info.get('path', '')
+                    remote_host = str(log_info.get('host', '') or '')
+                    remote_user = str(log_info.get('user', '') or '')
+                else:
+                    log_path = log_info
 
                 if isinstance(license_server, str) and isinstance(log_path, str) and log_path.strip():
+                    license_server = license_server.strip()
                     expanded_path = os.path.expandvars(os.path.expanduser(log_path.strip()))
-
-                    if os.path.isabs(expanded_path):
-                        self.log_dic[license_server.strip()] = os.path.normpath(expanded_path)
-                    else:
-                        self.log_dic[license_server.strip()] = expanded_path
+                    self.log_dic[license_server] = os.path.normpath(expanded_path) if os.path.isabs(expanded_path) else expanded_path
+                    self.remote_dic[license_server] = {
+                        'host': remote_host or self.get_host_from_server(license_server),
+                        'user': remote_user or self.ssh_user,
+                        'explicit_host': bool(remote_host),
+                    }
         except Exception as error:
             common.bprint('Failed on loading license log config from "' + str(self.log_config_file) + '".', level='Warning')
             common.bprint(error, color='yellow', display_method=1, indent=9)
             self.log_dic = {}
+
+    @staticmethod
+    def get_host_from_server(license_server):
+        """
+        Get SSH host from a FlexNet server key such as 5280@lic_host.
+        """
+        license_server = str(license_server).strip()
+
+        if '@' in license_server:
+            return license_server.split('@', 1)[1]
+
+        return license_server
 
     def set_log_paths(self, log_paths, override=False):
         """
@@ -169,6 +194,7 @@ class LicenseLogParser():
             if (not isinstance(license_server, str)) or (not isinstance(log_path, str)) or (not log_path.strip()):
                 continue
 
+            license_server = license_server.strip()
             expanded_path = os.path.expandvars(os.path.expanduser(log_path.strip()))
 
             if override or (license_server not in self.log_dic):
@@ -176,6 +202,11 @@ class LicenseLogParser():
                     self.log_dic[license_server] = os.path.normpath(expanded_path)
                 else:
                     self.log_dic[license_server] = expanded_path
+                self.remote_dic[license_server] = {
+                    'host': self.get_host_from_server(license_server),
+                    'user': self.ssh_user,
+                    'explicit_host': False,
+                }
 
     @staticmethod
     def discover_license_log_paths(license_server_list, ssh_user=''):
@@ -245,24 +276,69 @@ class LicenseLogParser():
         return discovered_log_dic
 
     @staticmethod
-    def get_file_signature(log_path):
-        """Return a stable signature used to detect log replacement/rotation."""
-        signature = ''
+    def shell_quote(value):
+        """
+        Quote a path safely for the remote POSIX shell.
+        """
+        return shlex.quote(str(value))
 
+    @staticmethod
+    def get_file_signature(log_path):
+        """Return a base64 signature used to detect log replacement/rotation."""
         try:
             with open(log_path, 'rb') as log_file:
-                signature = str(log_file.read(4096))
+                return base64.b64encode(log_file.read(4096)).decode('ascii')
         except Exception:
-            signature = ''
+            return ''
 
-        return signature
+    def get_remote_log_chunk(self, license_server, log_path, offset):
+        """
+        Read size/head-signature/new bytes from a remote license.log via SSH.
+
+        base64 keeps the transfer byte-safe.  tail -c +N uses one-based byte
+        numbering, therefore an offset of zero becomes +1.
+        """
+        remote_info = self.remote_dic.get(license_server, {})
+        host_name = str(remote_info.get('host') or self.get_host_from_server(license_server))
+        user_name = str(remote_info.get('user') or self.ssh_user or getpass.getuser())
+        quoted_path = self.shell_quote(log_path)
+        marker = '__LICENSE_MONITOR_LOG_DATA__'
+        command = (
+            'printf "%s\\n" "$(wc -c < ' + quoted_path + ')"; '
+            'head -c 4096 ' + quoted_path + ' | base64; '
+            'printf "\\n' + marker + '\\n"; '
+            'tail -c +' + str(int(offset) + 1) + ' ' + quoted_path + ' | base64'
+        )
+        stdout_list = common.ssh_client(host_name=host_name, user_name=user_name, command=command, timeout=1)
+
+        if not stdout_list:
+            raise IOError('empty result from SSH command')
+
+        marker_index = None
+
+        for index in range(1, len(stdout_list)):
+            if stdout_list[index].strip() == marker:
+                marker_index = index
+                break
+
+        if marker_index is None:
+            raise IOError('invalid result from SSH command')
+
+        current_size = int(stdout_list[0].strip())
+        signature_b64 = ''.join(stdout_list[1:marker_index]).strip()
+        data_b64 = ''.join(stdout_list[(marker_index + 1):]).strip()
+        signature_bytes = base64.b64decode(signature_b64) if signature_b64 else b''
+        new_bytes = base64.b64decode(data_b64) if data_b64 else b''
+
+        return current_size, base64.b64encode(signature_bytes).decode('ascii'), new_bytes
 
     def get_log_events(self, license_server):
         """
         Read only new complete lines for one server.
 
-        Returned events are held in pending_state_dic until commit_log_state()
-        is called.  Therefore a SQLite failure cannot silently lose events.
+        If the discovered path is not local, read it on the license server over
+        SSH.  Returned events are held in pending_state_dic until
+        commit_log_state() is called, so a SQLite failure cannot lose events.
         """
         event_list = []
 
@@ -270,28 +346,45 @@ class LicenseLogParser():
             return event_list
 
         log_path = self.log_dic[license_server]
+        remote_info = self.remote_dic.get(license_server, {})
+        force_remote = bool(remote_info.get('explicit_host', False))
+        local_file_exists = os.path.exists(log_path)
 
-        if not os.path.exists(log_path):
+        if (not local_file_exists) and (not remote_info.get('host')):
             common.bprint('License log file "' + str(log_path) + '" does not exist for server "' + str(license_server) + '".', level='Warning')
             return event_list
 
         try:
-            current_size = os.path.getsize(log_path)
-            current_signature = self.get_file_signature(log_path)
-            saved_state = self.state_dic.get(log_path, {})
-            last_offset = int(saved_state.get('offset', 0))
-            saved_signature = str(saved_state.get('signature', ''))
+            if force_remote or (not local_file_exists):
+                saved_state = self.state_dic.get(log_path, {})
+                last_offset = int(saved_state.get('offset', 0))
+                saved_signature = str(saved_state.get('signature', ''))
+                current_size, current_signature, new_bytes = self.get_remote_log_chunk(license_server, log_path, last_offset)
 
-            if current_size < last_offset or (saved_signature and (current_signature != saved_signature)):
-                common.bprint(
-                    'License log "' + str(log_path) + '" was rotated or replaced; reading it from the beginning.',
-                    level='Info'
-                )
-                last_offset = 0
+                if current_size < last_offset or (saved_signature and (current_signature != saved_signature)):
+                    common.bprint(
+                        'Remote license log "' + str(log_path) + '" was rotated or replaced; reading it from the beginning.',
+                        level='Info'
+                    )
+                    last_offset = 0
+                    current_size, current_signature, new_bytes = self.get_remote_log_chunk(license_server, log_path, last_offset)
+            else:
+                current_size = os.path.getsize(log_path)
+                current_signature = self.get_file_signature(log_path)
+                saved_state = self.state_dic.get(log_path, {})
+                last_offset = int(saved_state.get('offset', 0))
+                saved_signature = str(saved_state.get('signature', ''))
 
-            with open(log_path, 'rb') as log_file:
-                log_file.seek(last_offset)
-                new_bytes = log_file.read()
+                if current_size < last_offset or (saved_signature and (current_signature != saved_signature)):
+                    common.bprint(
+                        'License log "' + str(log_path) + '" was rotated or replaced; reading it from the beginning.',
+                        level='Info'
+                    )
+                    last_offset = 0
+
+                with open(log_path, 'rb') as log_file:
+                    log_file.seek(last_offset)
+                    new_bytes = log_file.read()
 
             # Never consume an incomplete final line.  It will be completed and
             # picked up by the next sampling run.
@@ -390,6 +483,7 @@ class LicenseLogParser():
         saw_time = False
         last_time_of_day = None
         event_list = []
+        unmatched_event_lines = []
 
         for raw_line in content.splitlines():
             line = raw_line.strip()
@@ -410,6 +504,8 @@ class LicenseLogParser():
                 match = EVENT_LINE_SPACE_HOST_PATTERN.match(line)
 
             if not match:
+                if re.search(r'\b(?:OUT|IN)\s*:', line, re.IGNORECASE) and (len(unmatched_event_lines) < 10):
+                    unmatched_event_lines.append(line)
                 continue
 
             timestamp_string = match.group('timestamp') or ''
@@ -457,6 +553,12 @@ class LicenseLogParser():
                 'lic_num': lic_num,
                 'raw_line': line,
             })
+
+        if unmatched_event_lines:
+            common.bprint('Some OUT/IN lines did not match the supported FlexNet format:', level='Warning')
+
+            for line in unmatched_event_lines:
+                common.bprint(line, color='yellow', display_method=1, indent=9)
 
         return event_list
 

@@ -1,5 +1,12 @@
 # This file is OPTIONAL.
-# Sampling automatically discovers license.log from each running lmgrd process.
-# Use this YAML only as a manual override when SSH process discovery cannot find it.
+# Sampling automatically discovers and reads license.log through SSH.
+# Use this YAML only as a manual override when process discovery cannot find it.
 license_logs:
+  # Simple form:
   # "5280@lic_server": "/var/log/lmgrd/license.log"
+
+  # Advanced form with an explicit SSH host/user:
+  # "5280@lic_server":
+  #   path: "/var/log/lmgrd/license.log"
+  #   host: "lic_server"
+  #   user: "zpy"

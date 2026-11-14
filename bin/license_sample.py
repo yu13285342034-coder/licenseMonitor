@@ -139,6 +139,7 @@ class Sampling:
         self.log_parser = common_license_log.LicenseLogParser(
             log_config_file=license_log_config_file,
             db_path=config.db_path,
+            ssh_user=getattr(config, 'license_log_ssh_user', ''),
         )
 
         license_server_list = []

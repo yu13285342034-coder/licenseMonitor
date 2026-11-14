@@ -118,6 +118,10 @@ db_path = "''' + str(db_path) + '''"
 # Optional manual license.log overrides; automatic SSH discovery is used first.
 license_log_config_file = "''' + str(license_log_config_file) + '''"
 
+# SSH user used to discover/read license.log on each license server.
+# Empty means the current OS user.
+license_log_ssh_user = ""
+
 # Specify which are the primary factors when getting project information.
 # It could be one or serveral items between "user/execute_host/submit_host".
 project_primary_factors = "user  execute_host  submit_host"
