@@ -362,7 +362,18 @@ class LicenseLogParser():
         stdout_list = common.ssh_client(host_name=host_name, user_name=user_name, command=command, timeout=1)
 
         if not stdout_list:
-            raise IOError('empty result from SSH command')
+            # common.ssh_client returns an empty list when login fails or the
+            # remote channel produces no stdout.  Run a tiny probe so the
+            # concise LOG READ line can distinguish auth/host issues from an
+            # ordinary command failure.
+            probe_command = 'printf "%s\\n" __LICENSE_MONITOR_SSH_PROBE_OK__; id -un; hostname'
+            probe_result = common.ssh_client(host_name=host_name, user_name=user_name, command=probe_command, timeout=1)
+            probe_text = '\n'.join(probe_result)
+
+            if '__LICENSE_MONITOR_SSH_PROBE_OK__' not in probe_text:
+                raise IOError('ssh-login-failed')
+
+            raise IOError('ssh-command-empty-result')
 
         marker_index = None
 
