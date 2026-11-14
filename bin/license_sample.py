@@ -48,6 +48,10 @@ def read_args():
                         action='store_true',
                         default=False,
                         help='Sample license feature utilization info.')
+    parser.add_argument('-v', '--verbose',
+                        action='store_true',
+                        default=False,
+                        help='Show detailed sampling progress.')
 
     args = parser.parse_args()
 
@@ -55,16 +59,17 @@ def read_args():
         common.bprint('At least one argument of "usage/utilization" must be selected.', level='Error')
         sys.exit(1)
 
-    return args.usage, args.utilization
+    return args.usage, args.utilization, args.verbose
 
 
 class Sampling:
     """
     Sample and save license feature information.
     """
-    def __init__(self, usage_sampling, utilization_sampling):
+    def __init__(self, usage_sampling, utilization_sampling, verbose=False):
         self.usage_sampling = usage_sampling
         self.utilization_sampling = utilization_sampling
+        self.verbose = bool(verbose)
 
         # Get sample time.
         self.sample_second = int(time.time())
@@ -93,6 +98,7 @@ class Sampling:
         self.log_events_dic = {}
         self.license_dic = {}
         self.init_log_parser()
+        self.print_log_read_status()
 
         # Get current feature/capacity metadata with lmstat.  It is no longer
         # used as the primary source for usage curves when license.log exists.
@@ -107,7 +113,7 @@ class Sampling:
         if not hasattr(config, 'lmstat_bsub_command'):
             config.lmstat_bsub_command = ''
 
-        print('>>> Sampling license usage information ...')
+        self.vprint('>>> Sampling license usage information ...')
 
         if os.environ.get('LM_LICENSE_FILE', '').strip():
             my_get_license_info = common_license.GetLicenseInfo(lmstat_path=config.lmstat_path, bsub_command=config.lmstat_bsub_command)
@@ -118,6 +124,33 @@ class Sampling:
         if self.log_parser:
             self.store_log_events()
             self.seed_license_dic_from_log_events()
+
+    def vprint(self, message=''):
+        """
+        Print detailed progress only when --verbose is requested.
+        """
+        if self.verbose:
+            print(message)
+
+    def print_log_read_status(self):
+        """
+        Print one concise line per license.log so production can quickly check
+        whether each log was actually read.
+        """
+        if not self.log_parser:
+            print('LOG READ: NO reason=license-log-not-discovered')
+            return
+
+        for license_server, license_log in sorted(self.log_parser.log_dic.items()):
+            result = self.log_parser.read_result_dic.get(license_server, {})
+            status = str(result.get('status', 'NOT_READ')).upper()
+            reason = str(result.get('reason', '')).strip()
+
+            if status == 'READ':
+                print('LOG READ: YES server=' + str(license_server) + ' path=' + str(license_log) + ' new_events=' + str(result.get('new_events', 0)))
+            else:
+                suffix = ' reason=' + reason if reason else ''
+                print('LOG READ: NO server=' + str(license_server) + ' path=' + str(license_log) + suffix)
 
     def init_log_parser(self):
         """
@@ -134,7 +167,7 @@ class Sampling:
         if (not hasattr(config, 'db_path')) or (not config.db_path):
             return
 
-        print('>>> Discovering license log paths ...')
+        self.vprint('>>> Discovering license log paths ...')
 
         self.log_parser = common_license_log.LicenseLogParser(
             log_config_file=license_log_config_file,
@@ -157,9 +190,9 @@ class Sampling:
 
         if self.log_parser.log_dic:
             for license_server, license_log in sorted(self.log_parser.log_dic.items()):
-                print('    Using license.log "' + str(license_log) + '" for server "' + str(license_server) + '".')
+                self.vprint('    Using license.log "' + str(license_log) + '" for server "' + str(license_server) + '".')
         else:
-            common.bprint('No license.log was discovered automatically. Log parsing will be skipped.', level='Info')
+            common.bprint('No license.log was discovered automatically.', level='Warning')
             self.log_parser = None
             return
 
@@ -173,7 +206,7 @@ class Sampling:
             events = self.log_parser.get_log_events(license_server)
 
             if events:
-                print('    Collected ' + str(len(events)) + ' new OUT/IN events for server "' + str(license_server) + '" from license.log.')
+                self.vprint('    Collected ' + str(len(events)) + ' new OUT/IN events for server "' + str(license_server) + '" from license.log.')
                 self.log_events_dic.setdefault(license_server, []).extend(events)
 
     def create_db_path(self, db_path):
@@ -182,7 +215,7 @@ class Sampling:
         """
         if not os.path.exists(db_path):
             try:
-                print('    Create directory "' + str(db_path) + '".')
+                self.vprint('    Create directory "' + str(db_path) + '".')
                 os.makedirs(db_path, mode=0o755)
             except Exception as error:
                 common.bprint('Failed on creating database directory "' + str(db_path) + '".', level='Error')
@@ -196,7 +229,7 @@ class Sampling:
         Copy source_file into target_dir.
         """
         try:
-            print('    Copy "' + str(source_file) + '" into directory "' + str(target_dir) + '".')
+            self.vprint('    Copy "' + str(source_file) + '" into directory "' + str(target_dir) + '".')
             shutil.copy(source_file, target_dir)
         except Exception as warning:
             common.bprint('Failed on copying "' + str(source_file) + '" into directory "' + str(target_dir) + '".', level='Warning')
@@ -206,7 +239,7 @@ class Sampling:
         """
         Detect config/project/* and save new update into config.db_path/project_setting.
         """
-        print('>>> Detect project setting ...')
+        self.vprint('>>> Detect project setting ...')
 
         project_list_file = os.path.realpath(str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/config/project/project_list')
         project_submit_host_file = os.path.realpath(str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/config/project/project_submit_host')
@@ -251,7 +284,7 @@ class Sampling:
         """
         Sample license feature usage info and save it into sqlite db.
         """
-        print('>>> Sampling usage info ...')
+        self.vprint('>>> Sampling usage info ...')
 
         for license_server in self.license_dic.keys():
             for vendor_daemon in self.license_dic[license_server]['vendor_daemon'].keys():
@@ -271,7 +304,7 @@ class Sampling:
                     for feature in self.license_dic[license_server]['vendor_daemon'][vendor_daemon]['feature'].keys():
                         usage_table_name = feature
 
-                        print('    Sampling usage info for "' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature) + '" ...')
+                        self.vprint('    Sampling usage info for "' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature) + '" ...')
 
                         if usage_table_name not in usage_table_list:
                             # Generate database table title.
@@ -294,7 +327,7 @@ class Sampling:
                                     begin_line = 0
                                     end_line = int(usage_table_count) - 100000
 
-                                    print('    Deleting database "' + str(usage_db_file) + '" table "' + str(usage_table_name) + '" ' + str(begin_line) + '-' + str(end_line) + ' lines to only keep 100000 items.')
+                                    self.vprint('    Deleting database "' + str(usage_db_file) + '" table "' + str(usage_table_name) + '" ' + str(begin_line) + '-' + str(end_line) + ' lines to only keep 100000 items.')
 
                                     common_sqlite3.delete_sql_table_rows(usage_db_file, usage_db_conn, usage_table_name, row_id, begin_line, end_line)
 
@@ -321,7 +354,7 @@ class Sampling:
         """
         Sample license feature utilization info and save it into sqlite db.
         """
-        print('>>> Sampling utilization info ...')
+        self.vprint('>>> Sampling utilization info ...')
 
         for license_server in self.license_dic.keys():
             for vendor_daemon in self.license_dic[license_server]['vendor_daemon'].keys():
@@ -342,7 +375,7 @@ class Sampling:
                     for (feature, feature_dic) in feature_utilization_dic.items():
                         utilization_table_name = feature
 
-                        print('    Sampling utilization info for "' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature) + '" ...')
+                        self.vprint('    Sampling utilization info for "' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature) + '" ...')
 
                         # Clean up utilization database, only keep 100000 items.
                         if utilization_table_name in utilization_table_list:
@@ -354,7 +387,7 @@ class Sampling:
                                     begin_line = 0
                                     end_line = int(utilization_table_count) - 100000
 
-                                    print('    Deleting database "' + str(utilization_db_file) + '" table "' + str(utilization_table_name) + '" ' + str(begin_line) + '-' + str(end_line) + ' lines to only keep 100000 items.')
+                                    self.vprint('    Deleting database "' + str(utilization_db_file) + '" table "' + str(utilization_table_name) + '" ' + str(begin_line) + '-' + str(end_line) + ' lines to only keep 100000 items.')
 
                                     common_sqlite3.delete_sql_table_rows(utilization_db_file, utilization_db_conn, utilization_table_name, row_id, begin_line, end_line)
 
@@ -428,8 +461,7 @@ class Sampling:
         """
         Count license feature utilization day info and save it into sqlite db.
         """
-        print('')
-        print('>>> Counting utilization (day average) info ...')
+        self.vprint('>>> Counting utilization (day average) info ...')
 
         for license_server in self.license_dic.keys():
             for vendor_daemon in self.license_dic[license_server]['vendor_daemon'].keys():
@@ -444,7 +476,7 @@ class Sampling:
                     key_type_list = ['TEXT PRIMARY KEY', 'TEXT', 'INTEGER', 'TEXT']
 
                     for (utilization_day_table_name, utilization_day_table_dic) in utilization_day_dic.items():
-                        print('    Counting utilization (day average) info for "' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(utilization_day_table_name) + '" ...')
+                        self.vprint('    Counting utilization (day average) info for "' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(utilization_day_table_name) + '" ...')
 
                         # Generate sql table.
                         if utilization_day_table_name not in utilization_day_table_list:
@@ -465,7 +497,7 @@ class Sampling:
                                     begin_line = 0
                                     end_line = int(utilization_day_table_count) - 3650
 
-                                    print('    Deleting database "' + str(utilization_day_db_file) + '" table "' + str(utilization_day_table_name) + '" ' + str(begin_line) + '-' + str(end_line) + ' lines to only keep 100000 items.')
+                                    self.vprint('    Deleting database "' + str(utilization_day_db_file) + '" table "' + str(utilization_day_table_name) + '" ' + str(begin_line) + '-' + str(end_line) + ' lines to only keep 100000 items.')
 
                                     common_sqlite3.delete_sql_table_rows(utilization_day_db_file, utilization_day_db_conn, utilization_day_table_name, row_id, begin_line, end_line)
 
@@ -628,7 +660,7 @@ class Sampling:
             return
 
         event_db_file = self.get_license_event_db_file()
-        print('>>> Saving license.log OUT/IN events into "' + str(event_db_file) + '" ...')
+        self.vprint('>>> Saving license.log OUT/IN events into "' + str(event_db_file) + '" ...')
 
         try:
             event_conn = self.connect_license_event_db()
@@ -799,7 +831,7 @@ class Sampling:
         max_event_id = int(event_conn.execute('SELECT COALESCE(MAX(id), 0) FROM events').fetchone()[0])
         integrated_id = self.get_event_meta(event_conn, 'usage_event_id')
         groups = self.get_log_event_groups(event_conn, after_event_id=integrated_id, before_event_id=max_event_id)
-        print('>>> Rebuilding usage database from license.log events ...')
+        self.vprint('>>> Rebuilding usage database from license.log events ...')
 
         for (license_server, vendor_daemon, feature) in groups:
             db_path = str(config.db_path) + '/license_server/' + str(license_server) + '/' + str(vendor_daemon)
@@ -871,7 +903,7 @@ class Sampling:
             usage_conn.commit()
             usage_conn.close()
 
-            print('    Rebuilt ' + str(len(usage_rows)) + ' usage sessions for ' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature))
+            self.vprint('    Rebuilt ' + str(len(usage_rows)) + ' usage sessions for ' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature))
 
         self.set_event_meta(event_conn, 'usage_event_id', max_event_id)
         event_conn.close()
@@ -900,7 +932,7 @@ class Sampling:
         max_event_id = int(event_conn.execute('SELECT COALESCE(MAX(id), 0) FROM events').fetchone()[0])
         integrated_id = self.get_event_meta(event_conn, 'utilization_event_id')
         groups = self.get_log_event_groups(event_conn, after_event_id=integrated_id, before_event_id=max_event_id)
-        print('>>> Rebuilding utilization curve from license.log events ...')
+        self.vprint('>>> Rebuilding utilization curve from license.log events ...')
 
         for (license_server, vendor_daemon, feature) in groups:
             db_path = str(config.db_path) + '/license_server/' + str(license_server) + '/' + str(vendor_daemon)
@@ -1008,7 +1040,7 @@ class Sampling:
             utilization_conn.commit()
             utilization_conn.close()
 
-            print('    Rebuilt ' + str(len(final_rows)) + ' curve points for ' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature))
+            self.vprint('    Rebuilt ' + str(len(final_rows)) + ' curve points for ' + str(license_server) + '/' + str(vendor_daemon) + '/' + str(feature))
 
         self.set_event_meta(event_conn, 'utilization_event_id', max_event_id)
         event_conn.close()
@@ -1065,8 +1097,8 @@ class Sampling:
 # Main Process #
 ################
 def main():
-    (usage, utilization) = read_args()
-    my_sampling = Sampling(usage, utilization)
+    (usage, utilization, verbose) = read_args()
+    my_sampling = Sampling(usage, utilization, verbose)
     my_sampling.detect_project_setting()
     my_sampling.sampling()
 

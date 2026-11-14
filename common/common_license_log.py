@@ -74,6 +74,7 @@ class LicenseLogParser():
         self.remote_dic = {}
         self.state_dic = {}
         self.pending_state_dic = {}
+        self.read_result_dic = {}
 
         self.load_state()
         self.load_log_config()
@@ -259,7 +260,6 @@ class LicenseLogParser():
                     continue
 
                 port_log_dic[str(port)] = pid_log_dic[process_id]
-                print('    Discovered license.log "' + str(pid_log_dic[process_id]) + '" for ' + str(port) + '@' + str(host_name))
 
             candidates = candidates_by_host[host_name]
 
@@ -349,8 +349,16 @@ class LicenseLogParser():
         remote_info = self.remote_dic.get(license_server, {})
         force_remote = bool(remote_info.get('explicit_host', False))
         local_file_exists = os.path.exists(log_path)
+        self.read_result_dic[license_server] = {
+            'status': 'NOT_READ',
+            'path': log_path,
+            'new_events': 0,
+            'reason': '',
+        }
 
         if (not local_file_exists) and (not remote_info.get('host')):
+            self.read_result_dic[license_server]['status'] = 'ERROR'
+            self.read_result_dic[license_server]['reason'] = 'file-not-found'
             common.bprint('License log file "' + str(log_path) + '" does not exist for server "' + str(license_server) + '".', level='Warning')
             return event_list
 
@@ -362,10 +370,6 @@ class LicenseLogParser():
                 current_size, current_signature, new_bytes = self.get_remote_log_chunk(license_server, log_path, last_offset)
 
                 if current_size < last_offset or (saved_signature and (current_signature != saved_signature)):
-                    common.bprint(
-                        'Remote license log "' + str(log_path) + '" was rotated or replaced; reading it from the beginning.',
-                        level='Info'
-                    )
                     last_offset = 0
                     current_size, current_signature, new_bytes = self.get_remote_log_chunk(license_server, log_path, last_offset)
             else:
@@ -376,10 +380,6 @@ class LicenseLogParser():
                 saved_signature = str(saved_state.get('signature', ''))
 
                 if current_size < last_offset or (saved_signature and (current_signature != saved_signature)):
-                    common.bprint(
-                        'License log "' + str(log_path) + '" was rotated or replaced; reading it from the beginning.',
-                        level='Info'
-                    )
                     last_offset = 0
 
                 with open(log_path, 'rb') as log_file:
@@ -388,6 +388,7 @@ class LicenseLogParser():
 
             # Never consume an incomplete final line.  It will be completed and
             # picked up by the next sampling run.
+            self.read_result_dic[license_server]['status'] = 'READ'
             complete_length = new_bytes.rfind(b'\n') + 1
             if complete_length <= 0:
                 return event_list
@@ -395,6 +396,8 @@ class LicenseLogParser():
             new_content = new_bytes[:complete_length].decode('utf-8', errors='ignore')
             event_list = self.parse_log_content(new_content)
             new_offset = last_offset + complete_length
+
+            self.read_result_dic[license_server]['new_events'] = len(event_list)
 
             for event in event_list:
                 event['license_server'] = license_server
@@ -406,6 +409,8 @@ class LicenseLogParser():
                 'updated_second': int(time.time()),
             }
         except Exception as error:
+            self.read_result_dic[license_server]['status'] = 'ERROR'
+            self.read_result_dic[license_server]['reason'] = str(error).replace('\n', ' ')[:200]
             common.bprint('Failed on reading license log "' + str(log_path) + '".', level='Warning')
             common.bprint(error, color='yellow', display_method=1, indent=9)
             return []
