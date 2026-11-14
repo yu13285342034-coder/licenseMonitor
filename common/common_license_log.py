@@ -210,20 +210,23 @@ class LicenseLogParser():
                 }
 
     @staticmethod
-    def discover_license_log_paths(license_server_list, ssh_user=''):
+    def discover_license_log_paths(license_server_list, ssh_user='', license_files_dic=None):
         """
         Discover FlexNet manager log paths from running lmgrd processes.
 
-        This uses the same SSH + netstat/ps mechanism as
-        tools/get_license_log.py, but without requiring an intermediate YAML
-        file.  Input and returned keys normally look like "5280@lic_host".
+        This uses the same SSH + ps logic as SERVER tab's license-log viewer.
+        netstat is kept only as a fallback when ps output cannot identify which
+        lmgrd process belongs to which port.  license_files_dic comes from
+        lmstat and is used to disambiguate hosts running several lmgrd daemons.
         """
         if not isinstance(license_server_list, (list, tuple, set)):
             return {}
 
+        if not isinstance(license_files_dic, dict):
+            license_files_dic = {}
+
         user_name = str(ssh_user or getpass.getuser())
         candidates_by_host = {}
-        candidates_with_port = set()
 
         for license_server in license_server_list:
             license_server = str(license_server).strip()
@@ -234,44 +237,91 @@ class LicenseLogParser():
             host_name = license_server.split('@', 1)[1] if '@' in license_server else license_server
             candidates_by_host.setdefault(host_name, []).append(license_server)
 
-            if re.match(r'^\d+@\S+$', license_server):
-                candidates_with_port.add(license_server)
-
         discovered_log_dic = {}
+        ps_process_pattern = re.compile(r'^.*lmgrd.*\s+-c\s+(.*?)\s+-l\s+(\S+)\s*.*$', re.IGNORECASE)
+        ps_pid_pattern = re.compile(r'^\S+\s+(\d+)\s+.*lmgrd\s+.*-l\s+(\S+).*$', re.IGNORECASE)
 
         for host_name in sorted(candidates_by_host.keys()):
             pid_port_dic = {}
-            pid_log_dic = {}
+            process_log_dic = {}
+            process_license_dic = {}
             port_log_dic = {}
-            command = 'netstat -anp | grep lmgrd ; ps aux | grep lmgrd'
+            command = 'ps -aux | grep lmgrd ; netstat -anp | grep lmgrd'
             stdout_list = common.ssh_client(host_name=host_name, user_name=user_name, command=command, timeout=1)
 
             for line in stdout_list:
+                process_match = ps_process_pattern.match(line)
                 netstat_match = re.match(r'^\s*\S+\s+\d+\s+\d+\s+\S+:(\d+)\s+.*\b(ESTABLISHED|LISTEN)\s+(\d+)/lmgrd\s*$', line, re.IGNORECASE)
-                ps_match = re.match(r'^\S+\s+(\d+)\s+.*lmgrd\s+.*-l\s+(\S+).*$', line)
+                pid_match = ps_pid_pattern.match(line)
 
-                if netstat_match:
+                if process_match:
+                    process_license_dic_key = str(process_match.group(1)).strip()
+                    process_log_path = str(process_match.group(2)).strip()
+                    process_id = ''
+                    pid_match_for_process = ps_pid_pattern.match(line)
+
+                    if pid_match_for_process:
+                        process_id = pid_match_for_process.group(1)
+
+                    if process_id:
+                        process_log_dic[process_id] = process_log_path
+                        process_license_dic[process_id] = process_license_dic_key
+                elif netstat_match:
                     pid_port_dic[netstat_match.group(3)] = netstat_match.group(1)
-                elif ps_match:
-                    pid_log_dic[ps_match.group(1)] = ps_match.group(2)
 
             for process_id, port in pid_port_dic.items():
-                if process_id not in pid_log_dic:
-                    continue
+                if process_id in process_log_dic:
+                    port_log_dic[str(port)] = process_log_dic[process_id]
 
-                port_log_dic[str(port)] = pid_log_dic[process_id]
-
+            ps_candidates = list(process_log_dic.values())
+            netstat_candidates = list(port_log_dic.values())
             candidates = candidates_by_host[host_name]
 
+            # Preferred behavior: exactly what View License Log does on the
+            # SERVER/FEATURE/USAGE tabs -- match the lmstat license file list
+            # against "-c" on the running lmgrd command line.
+            for license_server in candidates:
+                expected_license_files = str(license_files_dic.get(license_server, '')).strip()
+
+                # lmstat uses the hostname shown by "License server status",
+                # while sampling/database keys normally use port@hostname.
+                if (not expected_license_files) and ('@' in license_server):
+                    expected_license_files = str(license_files_dic.get(license_server.split('@', 1)[1], '')).strip()
+
+                if not expected_license_files:
+                    for metadata_server, metadata_license_files in license_files_dic.items():
+                        metadata_host = metadata_server.split('@', 1)[1] if '@' in metadata_server else metadata_server
+
+                        if metadata_host == host_name:
+                            expected_license_files = str(metadata_license_files).strip()
+                            break
+
+                matched_logs = []
+
+                for process_id, process_license_files in process_license_dic.items():
+                    if expected_license_files and (expected_license_files.find(process_license_files) != -1):
+                        matched_logs.append(process_log_dic[process_id])
+
+                matched_logs = list(dict.fromkeys(matched_logs))
+
+                if len(matched_logs) == 1:
+                    discovered_log_dic[license_server] = matched_logs[0]
+
+            # If lmstat could not provide a license-file list, allow a single
+            # lmgrd process on the host.  With several daemons, remain silent
+            # instead of attaching the wrong log.
+            if len(candidates) == 1 and (candidates[0] not in discovered_log_dic) and (len(ps_candidates) == 1):
+                discovered_log_dic[candidates[0]] = ps_candidates[0]
+
+            # Last fallback: old port-based relationship when ps/license-file
+            # matching is ambiguous.
             for port, log_path in port_log_dic.items():
                 preferred_server = str(port) + '@' + str(host_name)
 
-                if preferred_server in candidates:
+                if preferred_server in candidates and (preferred_server not in discovered_log_dic):
                     discovered_log_dic[preferred_server] = log_path
-                elif len(candidates) == 1:
+                elif len(candidates) == 1 and (candidates[0] not in discovered_log_dic):
                     discovered_log_dic[candidates[0]] = log_path
-                else:
-                    discovered_log_dic[preferred_server] = log_path
 
         return discovered_log_dic
 

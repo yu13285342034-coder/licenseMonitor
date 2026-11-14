@@ -92,16 +92,10 @@ class Sampling:
                         else:
                             os.environ['LM_LICENSE_FILE'] = str(line)
 
-        # license.log is the authoritative OUT/IN source.  Read it before lmstat
-        # so a server can still be sampled when lmstat is unavailable.
         self.log_parser = None
         self.log_events_dic = {}
         self.license_dic = {}
-        self.init_log_parser()
-        self.print_log_read_status()
 
-        # Get current feature/capacity metadata with lmstat.  It is no longer
-        # used as the primary source for usage curves when license.log exists.
         if not hasattr(config, 'lmstat_path'):
             config.lmstat_path = []
 
@@ -115,11 +109,20 @@ class Sampling:
 
         self.vprint('>>> Sampling license usage information ...')
 
+        # lmstat supplies license-file metadata.  The SERVER tab's log viewer
+        # uses the same metadata to select the correct lmgrd -l log when a host
+        # runs more than one license manager.
         if os.environ.get('LM_LICENSE_FILE', '').strip():
             my_get_license_info = common_license.GetLicenseInfo(lmstat_path=config.lmstat_path, bsub_command=config.lmstat_bsub_command)
             self.license_dic = my_get_license_info.get_license_info()
-        else:
-            self.license_dic = {}
+
+        license_files_dic = {
+            license_server: license_dic.get('license_files', '')
+            for license_server, license_dic in self.license_dic.items()
+        }
+
+        self.init_log_parser(license_files_dic=license_files_dic)
+        self.print_log_read_status()
 
         if self.log_parser:
             self.store_log_events()
@@ -152,7 +155,7 @@ class Sampling:
                 suffix = ' reason=' + reason if reason else ''
                 print('LOG READ: NO server=' + str(license_server) + ' path=' + str(license_log) + suffix)
 
-    def init_log_parser(self):
+    def init_log_parser(self, license_files_dic=None):
         """
         Discover FlexNet license.log paths automatically and initialize parser.
 
@@ -185,6 +188,7 @@ class Sampling:
         discovered_log_dic = self.log_parser.discover_license_log_paths(
             license_server_list,
             ssh_user=getattr(config, 'license_log_ssh_user', ''),
+            license_files_dic=license_files_dic,
         )
         self.log_parser.set_log_paths(discovered_log_dic, override=False)
 
