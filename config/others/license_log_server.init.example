@@ -1,0 +1,10 @@
+# Manual license server and license log path list for the LOG CURVE tab.
+# One license server per line, format:
+#   ServerName:/path/to/license.log
+# Empty lines and lines starting with "#" are ignored.
+# The license log is read from the license server over SSH (incremental).
+#
+# Copy this file to license_log_server.init and uncomment/modify the lines:
+#
+# MasterServer:/apps/eda/license.log
+# 27000@lic_server_01:/var/flexnet/lmgrd.log

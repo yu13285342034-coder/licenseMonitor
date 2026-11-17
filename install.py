@@ -77,6 +77,7 @@ def gen_config_file():
     lmstat_path = str(CWD) + '/tools/lmstat'
     db_path = str(CWD) + '/db'
     license_log_config_file = str(CWD) + '/config/others/license_log.yaml'
+    license_log_server_init_file = str(CWD) + '/config/others/license_log_server.init'
     lm_license_file = str(CWD) + '/config/LM_LICENSE_FILE'
     product_feature_file = str(CWD) + '/config/others/product_feature.yaml'
     project_list_file = str(CWD) + '/config/project/project_list'
@@ -117,6 +118,11 @@ db_path = "''' + str(db_path) + '''"
 
 # Optional manual license.log overrides; automatic SSH discovery is used first.
 license_log_config_file = "''' + str(license_log_config_file) + '''"
+
+# Manual license server/log list for LOG CURVE tab, one server per line:
+#   ServerName:/path/to/license.log
+# The log is read from the license server over SSH.
+license_log_server_init_file = "''' + str(license_log_server_init_file) + '''"
 
 # SSH user used to discover/read license.log on each license server.
 # Empty means the current OS user.

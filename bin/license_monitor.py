@@ -5,6 +5,7 @@ import re
 import sys
 import time
 import copy
+import csv
 import yaml
 import getpass
 import datetime
@@ -20,6 +21,7 @@ from common import common
 from common import common_pyqt5
 from common import common_license
 from common import common_sqlite3
+from common import common_license_log
 
 # Import local config file if exists.
 local_config_dir = str(os.environ['HOME']) + '/.licenseMonitor/config'
@@ -314,6 +316,7 @@ class MainWindow(QMainWindow):
 
         if ('all' in self.administrator_list) or ('ALL' in self.administrator_list) or (USER in self.administrator_list):
             self.curve_tab = QWidget()
+            self.log_curve_tab = QWidget()
             self.utilization_tab = QWidget()
             self.cost_tab = QWidget()
 
@@ -325,6 +328,7 @@ class MainWindow(QMainWindow):
 
         if ('all' in self.administrator_list) or ('ALL' in self.administrator_list) or (USER in self.administrator_list):
             self.main_tab.addTab(self.curve_tab, 'CURVE')
+            self.main_tab.addTab(self.log_curve_tab, 'LOG CURVE')
             self.main_tab.addTab(self.utilization_tab, 'UTILIZATION')
             self.main_tab.addTab(self.cost_tab, 'COST')
 
@@ -342,6 +346,7 @@ class MainWindow(QMainWindow):
 
         if ('all' in self.administrator_list) or ('ALL' in self.administrator_list) or (USER in self.administrator_list):
             self.gen_curve_tab()
+            self.gen_log_curve_tab()
             self.gen_utilization_tab()
             self.gen_cost_tab()
 
@@ -367,6 +372,7 @@ class MainWindow(QMainWindow):
 
         if ('all' in self.administrator_list) or ('ALL' in self.administrator_list) or (USER in self.administrator_list):
             tab_dic['CURVE'] = self.curve_tab,
+            tab_dic['LOG CURVE'] = self.log_curve_tab,
             tab_dic['UTILIZATION'] = self.utilization_tab,
             tab_dic['COST'] = self.cost_tab,
 
@@ -400,6 +406,10 @@ class MainWindow(QMainWindow):
             export_curve_table_action.setIcon(QIcon(str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/data/pictures/save.png'))
             export_curve_table_action.triggered.connect(self.export_curve_table)
 
+            export_log_curve_table_action = QAction('Export log curve table', self)
+            export_log_curve_table_action.setIcon(QIcon(str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/data/pictures/save.png'))
+            export_log_curve_table_action.triggered.connect(self.export_log_curve_table)
+
             export_utilization_table_action = QAction('Export utilization table', self)
             export_utilization_table_action.setIcon(QIcon(str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/data/pictures/save.png'))
             export_utilization_table_action.triggered.connect(self.export_utilization_table)
@@ -420,6 +430,7 @@ class MainWindow(QMainWindow):
 
         if ('all' in self.administrator_list) or ('ALL' in self.administrator_list) or (USER in self.administrator_list):
             file_menu.addAction(export_curve_table_action)
+            file_menu.addAction(export_log_curve_table_action)
             file_menu.addAction(export_utilization_table_action)
             file_menu.addAction(export_cost_table_action)
 
@@ -2423,6 +2434,963 @@ licenseMonitor is an open source software for EDA software license information d
         axes.grid()
         self.curve_tab_canvas.draw()
 # For CURVE TAB (end) #
+
+# For LOG CURVE TAB (start) #
+    def init_log_curve_parser(self):
+        """
+        Initialize license log parser for LOG CURVE tab.
+
+        License servers and license log paths are specified manually in an init
+        file, one server per line with format "ServerName:/path/to/license.log".
+        Each license log is read from its license server over SSH with
+        common_license_log.  A separate state directory (config.db_path/license_log)
+        is used so LOG CURVE never interferes with license_sample sampling.
+        """
+        self.log_curve_parser = None
+
+        if (not hasattr(config, 'db_path')) or (not config.db_path):
+            common.bprint('config.db_path is not specified, LOG CURVE tab is disabled.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+            return
+
+        default_init_file = str(os.environ['LICENSE_MONITOR_INSTALL_PATH']) + '/config/others/license_log_server.init'
+        license_log_server_init_file = str(getattr(config, 'license_log_server_init_file', '') or default_init_file)
+
+        if not os.path.exists(license_log_server_init_file):
+            common.bprint('License log server init file "' + str(license_log_server_init_file) + '" does not exist, please create it with lines like "MasterServer:/apps/eda/license.log".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+
+        try:
+            self.log_curve_parser = common_license_log.LicenseLogParser(
+                log_config_file=license_log_server_init_file,
+                db_path=str(config.db_path) + '/license_log',
+                ssh_user=getattr(config, 'license_log_ssh_user', ''),
+            )
+        except Exception as error:
+            common.bprint('Failed on initializing license log parser for LOG CURVE tab.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+            common.bprint(error, color='yellow', display_method=1, indent=9)
+            self.log_curve_parser = None
+
+    def gen_log_curve_tab(self):
+        """
+        Generate LOG CURVE tab, show license usage curve parsed from license log.
+        """
+        self.init_log_curve_parser()
+
+        self.log_curve_tab_frame0 = QFrame(self.log_curve_tab)
+        self.log_curve_tab_frame0.setFrameShadow(QFrame.Raised)
+        self.log_curve_tab_frame0.setFrameShape(QFrame.Box)
+
+        self.log_curve_tab_table = QTableWidget(self.log_curve_tab)
+        self.log_curve_tab_table.itemClicked.connect(self.log_curve_tab_table_click)
+
+        self.log_curve_tab_frame1 = QFrame(self.log_curve_tab)
+        self.log_curve_tab_frame1.setFrameShadow(QFrame.Raised)
+        self.log_curve_tab_frame1.setFrameShape(QFrame.Box)
+
+        # Grid
+        log_curve_tab_grid = QGridLayout()
+
+        log_curve_tab_grid.addWidget(self.log_curve_tab_frame0, 0, 0, 1, 2)
+        log_curve_tab_grid.addWidget(self.log_curve_tab_table, 1, 0)
+        log_curve_tab_grid.addWidget(self.log_curve_tab_frame1, 1, 1)
+
+        log_curve_tab_grid.setRowStretch(0, 1)
+        log_curve_tab_grid.setRowStretch(1, 10)
+
+        log_curve_tab_grid.setColumnStretch(0, 2)
+        log_curve_tab_grid.setColumnStretch(1, 3)
+
+        self.log_curve_tab.setLayout(log_curve_tab_grid)
+
+        # Generate self.log_curve_tab_frame0, self.log_curve_tab_table and self.log_curve_tab_frame1.
+        self.gen_log_curve_tab_frame0()
+        self.gen_log_curve_tab_table()
+        self.gen_log_curve_tab_frame1()
+        self.update_log_curve_tab_frame1()
+
+    def gen_log_curve_tab_frame0(self):
+        # License Server (from license log init file)
+        log_curve_tab_server_label = QLabel('Server', self.log_curve_tab_frame0)
+        log_curve_tab_server_label.setStyleSheet('font-weight: bold;')
+        log_curve_tab_server_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.log_curve_tab_server_combo = common_pyqt5.QComboCheckBox(self.log_curve_tab_frame0)
+        self.set_log_curve_tab_server_combo()
+
+        # License Feature
+        log_curve_tab_feature_label = QLabel('Feature', self.log_curve_tab_frame0)
+        log_curve_tab_feature_label.setStyleSheet('font-weight: bold;')
+        log_curve_tab_feature_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.log_curve_tab_feature_line = QLineEdit()
+        self.log_curve_tab_feature_line.returnPressed.connect(self.filter_log_curve_tab)
+
+        log_curve_tab_feature_line_completer = common_pyqt5.get_completer(self.feature_list)
+        self.log_curve_tab_feature_line.setCompleter(log_curve_tab_feature_line_completer)
+
+        # Check button
+        log_curve_tab_check_button = QPushButton('Check', self.log_curve_tab_frame0)
+        log_curve_tab_check_button.setStyleSheet('''QPushButton:hover{background:rgb(170, 255, 127);}''')
+        log_curve_tab_check_button.clicked.connect(self.filter_log_curve_tab)
+
+        # Begin_Date
+        log_curve_tab_begin_date_label = QLabel('Begin_Date', self.log_curve_tab_frame0)
+        log_curve_tab_begin_date_label.setStyleSheet("font-weight: bold;")
+        log_curve_tab_begin_date_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.log_curve_tab_begin_date_edit = QDateEdit(self.log_curve_tab_frame0)
+        self.log_curve_tab_begin_date_edit.setDisplayFormat('yyyy-MM-dd')
+        self.log_curve_tab_begin_date_edit.setMinimumDate(QDate.currentDate().addDays(-3652))
+        self.log_curve_tab_begin_date_edit.setCalendarPopup(True)
+        self.log_curve_tab_begin_date_edit.setDate(QDate.currentDate().addDays(-7))
+
+        # End_Date
+        log_curve_tab_end_date_label = QLabel('End_Date', self.log_curve_tab_frame0)
+        log_curve_tab_end_date_label.setStyleSheet("font-weight: bold;")
+        log_curve_tab_end_date_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.log_curve_tab_end_date_edit = QDateEdit(self.log_curve_tab_frame0)
+        self.log_curve_tab_end_date_edit.setDisplayFormat('yyyy-MM-dd')
+        self.log_curve_tab_end_date_edit.setMinimumDate(QDate.currentDate().addDays(-3652))
+        self.log_curve_tab_end_date_edit.setCalendarPopup(True)
+        self.log_curve_tab_end_date_edit.setDate(QDate.currentDate())
+
+        # Empty label
+        log_curve_tab_empty_label = QLabel('', self.log_curve_tab_frame0)
+
+        # Export button
+        log_curve_tab_export_button = QPushButton('Export', self.log_curve_tab_frame0)
+        log_curve_tab_export_button.setStyleSheet('''QPushButton:hover{background:rgb(170, 255, 127);}''')
+        log_curve_tab_export_button.clicked.connect(self.export_log_curve_table)
+
+        # self.log_curve_tab_frame0 - Grid
+        log_curve_tab_frame0_grid = QGridLayout()
+
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_server_label, 0, 0)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_server_combo, 0, 1)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_feature_label, 0, 2)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_feature_line, 0, 3)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_check_button, 0, 4)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_empty_label, 0, 5)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_export_button, 0, 6)
+
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_begin_date_label, 1, 0)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_begin_date_edit, 1, 1)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_end_date_label, 1, 2)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_end_date_edit, 1, 3)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_export_button, 1, 6)
+
+        # Work hours filter for statistics.
+        log_curve_tab_work_start_label = QLabel('Work_Start', self.log_curve_tab_frame0)
+        log_curve_tab_work_start_label.setStyleSheet("font-weight: bold;")
+        log_curve_tab_work_start_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.log_curve_tab_work_start_edit = QLineEdit('9', self.log_curve_tab_frame0)
+        self.log_curve_tab_work_start_edit.setPlaceholderText('9 or 9.5')
+        self.log_curve_tab_work_start_edit.setFixedWidth(55)
+
+        log_curve_tab_work_end_label = QLabel('Work_End', self.log_curve_tab_frame0)
+        log_curve_tab_work_end_label.setStyleSheet("font-weight: bold;")
+        log_curve_tab_work_end_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.log_curve_tab_work_end_edit = QLineEdit('18', self.log_curve_tab_frame0)
+        self.log_curve_tab_work_end_edit.setPlaceholderText('18 or 18.5')
+        self.log_curve_tab_work_end_edit.setFixedWidth(55)
+
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_work_start_label, 2, 0)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_work_start_edit, 2, 1)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_work_end_label, 2, 2)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_work_end_edit, 2, 3)
+
+        self.log_curve_tab_workday_checkbox = QCheckBox('Only Workdays', self.log_curve_tab_frame0)
+        self.log_curve_tab_workday_checkbox.setChecked(True)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_workday_checkbox, 2, 4, 1, 2)
+
+        log_curve_tab_frame0_grid.setColumnStretch(1, 1)
+        log_curve_tab_frame0_grid.setColumnStretch(2, 1)
+        log_curve_tab_frame0_grid.setColumnStretch(3, 1)
+        log_curve_tab_frame0_grid.setColumnStretch(4, 1)
+        log_curve_tab_frame0_grid.setColumnStretch(5, 1)
+        log_curve_tab_frame0_grid.setColumnStretch(6, 1)
+
+        self.log_curve_tab_frame0.setLayout(log_curve_tab_frame0_grid)
+
+    def set_log_curve_tab_server_combo(self):
+        """
+        Set (initialize) self.log_curve_tab_server_combo with license servers from init file.
+        """
+        # Get license_server list.
+        license_server_list = []
+
+        if self.log_curve_parser:
+            license_server_list = sorted(self.log_curve_parser.log_dic.keys())
+
+        license_server_list.insert(0, 'ALL')
+
+        self.set_common_checkbox_combo(self.log_curve_tab_server_combo, license_server_list)
+
+    def filter_log_curve_tab(self):
+        """
+        Read license log over SSH, update self.log_curve_tab_table and self.log_curve_tab_frame1.
+        """
+        if not self.log_curve_parser:
+            common.bprint('LOG CURVE tab is not configured, please check "license_log_server_init_file" in config.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+            return
+
+        if not self.log_curve_parser.log_dic:
+            common.bprint('No license server is specified in license log init file, nothing to check.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+            return
+
+        common.bprint('Reading license log info ...', date_format='%Y-%m-%d %H:%M:%S')
+
+        my_show_message = ShowMessage('Info', 'Reading license log info, please wait a moment ...')
+        my_show_message.start()
+
+        events_dic = self.read_license_log_events()
+        all_events_dic = self.store_license_log_events(events_dic)
+        curve_dic = self.get_log_curve_info(all_events_dic)
+
+        my_show_message.terminate()
+
+        # Update feature completer with features from license log.
+        log_feature_list = []
+
+        for license_server in all_events_dic.keys():
+            for event in all_events_dic[license_server]:
+                if event['feature'] not in log_feature_list:
+                    log_feature_list.append(event['feature'])
+
+        if log_feature_list:
+            self.log_curve_tab_feature_line.setCompleter(common_pyqt5.get_completer(sorted(log_feature_list)))
+
+        self.gen_log_curve_tab_table(curve_dic)
+        self.update_log_curve_tab_frame1(curve_dic)
+
+    def read_license_log_events(self):
+        """
+        Read new OUT/IN events of each license server log over SSH with
+        common_license_log.  Only new events (incremental offset is saved in
+        db) are returned.
+        """
+        events_dic = {}
+
+        if not self.log_curve_parser:
+            return events_dic
+
+        for license_server in sorted(self.log_curve_parser.log_dic.keys()):
+            try:
+                event_list = self.log_curve_parser.get_log_events(license_server)
+            except Exception as error:
+                common.bprint('Failed on reading license log for server "' + str(license_server) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+                common.bprint(error, color='yellow', display_method=1, indent=9)
+                event_list = []
+
+            if event_list:
+                common.bprint('Collected ' + str(len(event_list)) + ' new license log events for server "' + str(license_server) + '".', date_format='%Y-%m-%d %H:%M:%S')
+
+            events_dic.setdefault(license_server, []).extend(event_list)
+
+        return events_dic
+
+    def store_license_log_events(self, events_dic={}):
+        """
+        Merge new license log events into csv file
+        db/license_log/<license_server>/events.csv, and update per-feature
+        usage curve csv files (same style as CURVE db data, but in csv format).
+        Return all stored events for each license server.
+        """
+        all_events_dic = {}
+        new_feature_dic = {}
+        store_failed = False
+
+        for license_server in sorted(events_dic.keys()):
+            events_csv_file = str(config.db_path) + '/license_log/' + str(license_server) + '/events.csv'
+            stored_event_list = self.load_license_log_events_csv(events_csv_file)
+
+            if events_dic[license_server]:
+                stored_event_list = self.merge_license_log_events(stored_event_list, events_dic[license_server])
+                stored_event_list.sort(key=lambda event: event['timestamp_second'])
+
+                try:
+                    os.makedirs(os.path.dirname(events_csv_file), mode=0o755, exist_ok=True)
+                    self.write_license_log_events_csv(events_csv_file, stored_event_list)
+
+                    for event in events_dic[license_server]:
+                        if event['feature'] not in new_feature_dic.setdefault(license_server, []):
+                            new_feature_dic[license_server].append(event['feature'])
+                except Exception as error:
+                    store_failed = True
+                    common.bprint('Failed on storing license log events into "' + str(events_csv_file) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+                    common.bprint(error, color='yellow', display_method=1, indent=9)
+
+            all_events_dic[license_server] = stored_event_list
+
+        if (not store_failed) and self.log_curve_parser:
+            # Only commit log offsets after events are stored successfully,
+            # otherwise the events will be read again next time.
+            self.log_curve_parser.commit_log_state()
+
+        # Update per-feature curve csv files for features with new events.
+        for license_server in sorted(new_feature_dic.keys()):
+            self.update_log_curve_feature_csv(license_server, new_feature_dic[license_server], all_events_dic.get(license_server, []))
+
+        return all_events_dic
+
+    @staticmethod
+    def get_license_log_event_signature(event):
+        """
+        Get a unique signature for one license log event (for csv dedup).
+        """
+        try:
+            lic_num = int(event.get('lic_num', 1))
+        except (TypeError, ValueError):
+            lic_num = 1
+
+        try:
+            timestamp_second = int(event.get('timestamp_second', 0))
+        except (TypeError, ValueError):
+            timestamp_second = 0
+
+        return (timestamp_second, str(event.get('event_type', '')).upper(), str(event.get('feature', '')), str(event.get('user', '')), str(event.get('host', '')), lic_num)
+
+    def merge_license_log_events(self, stored_event_list=[], new_event_list=[]):
+        """
+        Merge new events into stored events, skip events which are already
+        stored (protects against duplicated reads after crash or log rotation).
+        """
+        signature_set = set()
+
+        for event in stored_event_list:
+            signature_set.add(self.get_license_log_event_signature(event))
+
+        merged_event_list = list(stored_event_list)
+
+        for event in new_event_list:
+            signature = self.get_license_log_event_signature(event)
+
+            if signature not in signature_set:
+                signature_set.add(signature)
+                merged_event_list.append(event)
+
+        return merged_event_list
+
+    def load_license_log_events_csv(self, events_csv_file):
+        """
+        Load stored license log events from csv file.
+        """
+        event_list = []
+
+        if not os.path.exists(events_csv_file):
+            return event_list
+
+        try:
+            with open(events_csv_file, 'r', encoding='utf-8', newline='') as events_csv:
+                csv_reader = csv.DictReader(events_csv)
+
+                for row in csv_reader:
+                    try:
+                        timestamp_second = int(row.get('timestamp_second', 0))
+                    except (TypeError, ValueError):
+                        continue
+
+                    try:
+                        lic_num = str(int(row.get('lic_num', '1')))
+                    except (TypeError, ValueError):
+                        lic_num = '1'
+
+                    event_list.append({
+                                       'timestamp_second': timestamp_second,
+                                       'timestamp_str': str(row.get('timestamp_str', '')),
+                                       'event_type': str(row.get('event_type', '')).upper(),
+                                       'vendor': str(row.get('vendor', '')),
+                                       'feature': str(row.get('feature', '')),
+                                       'user': str(row.get('user', '')),
+                                       'host': str(row.get('host', '')),
+                                       'lic_num': lic_num,
+                                      })
+        except Exception as error:
+            common.bprint('Failed on loading license log events csv "' + str(events_csv_file) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+            common.bprint(error, color='yellow', display_method=1, indent=9)
+
+        return event_list
+
+    def write_license_log_events_csv(self, events_csv_file, event_list=[]):
+        """
+        Write license log events into csv file.
+        """
+        title_list = ['timestamp_second', 'timestamp_str', 'event_type', 'vendor', 'feature', 'user', 'host', 'lic_num']
+
+        with open(events_csv_file, 'w', encoding='utf-8', newline='') as events_csv:
+            csv_writer = csv.writer(events_csv)
+            csv_writer.writerow(title_list)
+
+            for event in event_list:
+                csv_writer.writerow([event['timestamp_second'], event['timestamp_str'], event['event_type'], event['vendor'], event['feature'], event['user'], event['host'], event['lic_num']])
+
+    def update_log_curve_feature_csv(self, license_server, feature_list=[], stored_event_list=[]):
+        """
+        Save per-feature license usage curve into csv file
+        db/license_log/<license_server>/<feature>.csv with columns
+        "sample_second/sample_time/in_use" (same style as CURVE tab usage.db
+        sample data, but in csv format, stored together under config.db_path).
+        """
+        if not feature_list:
+            return
+
+        server_db_path = str(config.db_path) + '/license_log/' + str(license_server)
+
+        try:
+            os.makedirs(server_db_path, mode=0o755, exist_ok=True)
+        except Exception as error:
+            common.bprint('Failed on creating directory "' + str(server_db_path) + '" for license log csv data.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+            common.bprint(error, color='yellow', display_method=1, indent=9)
+            return
+
+        for feature in feature_list:
+            feature_event_list = []
+
+            for event in stored_event_list:
+                if event['feature'] == feature:
+                    feature_event_list.append(event)
+
+            if not feature_event_list:
+                continue
+
+            feature_event_list.sort(key=lambda event: event['timestamp_second'])
+
+            running_num = 0
+            row_list = []
+
+            for event in feature_event_list:
+                try:
+                    lic_num = int(event['lic_num'])
+                except (TypeError, ValueError):
+                    lic_num = 1
+
+                if event['event_type'] == 'OUT':
+                    running_num += lic_num
+                else:
+                    running_num = max(0, running_num - lic_num)
+
+                sample_time = datetime.datetime.fromtimestamp(event['timestamp_second']).strftime('%Y%m%d_%H%M%S')
+                row_list.append([event['timestamp_second'], sample_time, running_num])
+
+            # Feature name may contain characters which are not allowed in a file name.
+            feature_csv_file = str(server_db_path) + '/' + re.sub(r'[^A-Za-z0-9._-]', '_', feature) + '.csv'
+
+            try:
+                with open(feature_csv_file, 'w', encoding='utf-8', newline='') as feature_csv:
+                    csv_writer = csv.writer(feature_csv)
+                    csv_writer.writerow(['sample_second', 'sample_time', 'in_use'])
+                    csv_writer.writerows(row_list)
+            except Exception as error:
+                common.bprint('Failed on writing license log curve csv "' + str(feature_csv_file) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+                common.bprint(error, color='yellow', display_method=1, indent=9)
+
+    def get_log_curve_info(self, all_events_dic={}):
+        """
+        Get license usage curve information from license log events, return
+        curve_dic with the same structure as CURVE tab:
+        curve_dic[feature][license_server]['sample_data'/'summary'].
+        """
+        curve_dic = {}
+
+        begin_date = self.log_curve_tab_begin_date_edit.date().toString(Qt.ISODate)
+        begin_time = str(begin_date) + ' 00:00:00'
+        begin_second = time.mktime(time.strptime(begin_time, '%Y-%m-%d %H:%M:%S'))
+        end_date = self.log_curve_tab_end_date_edit.date().toString(Qt.ISODate)
+        end_time = str(end_date) + ' 23:59:59'
+        end_second = time.mktime(time.strptime(end_time, '%Y-%m-%d %H:%M:%S'))
+
+        selected_license_server_dic = self.log_curve_tab_server_combo.selectedItems()
+        selected_license_server_list = list(selected_license_server_dic.values())
+        specified_license_feature = self.log_curve_tab_feature_line.text().strip()
+
+        # Collect all feature names from license log events.
+        feature_list = []
+
+        for license_server in all_events_dic.keys():
+            if ('ALL' in selected_license_server_list) or (license_server in selected_license_server_list):
+                for event in all_events_dic[license_server]:
+                    if event['feature'] not in feature_list:
+                        feature_list.append(event['feature'])
+
+        # Filter feature with exact or fuzzy match (same as CURVE tab).
+        specified_license_feature_list = []
+
+        if not specified_license_feature:
+            specified_license_feature_list = feature_list
+        else:
+            if specified_license_feature in feature_list:
+                specified_license_feature_list.append(specified_license_feature)
+            else:
+                for feature in feature_list:
+                    if re.search(re.escape(specified_license_feature.lower()), feature.lower()):
+                        specified_license_feature_list.append(feature)
+
+        for feature in specified_license_feature_list:
+            for license_server in all_events_dic.keys():
+                if ('ALL' in selected_license_server_list) or (license_server in selected_license_server_list):
+                    # Sort all events of this feature on this server.
+                    server_feature_all_list = []
+
+                    for event in all_events_dic[license_server]:
+                        if event['feature'] == feature:
+                            server_feature_all_list.append(event)
+
+                    server_feature_all_list.sort(key=lambda event: event['timestamp_second'])
+
+                    # Seed the running count with events before the date range,
+                    # so licenses checked out earlier and not returned yet are
+                    # still counted as in use inside the date range.
+                    pre_running_num = 0
+
+                    for event in server_feature_all_list:
+                        if event['timestamp_second'] >= begin_second:
+                            break
+
+                        try:
+                            lic_num = int(event['lic_num'])
+                        except (TypeError, ValueError):
+                            lic_num = 1
+
+                        if event['event_type'] == 'OUT':
+                            pre_running_num += lic_num
+                        else:
+                            pre_running_num = max(0, pre_running_num - lic_num)
+
+                    feature_event_list = []
+
+                    for event in server_feature_all_list:
+                        if begin_second <= event['timestamp_second'] <= end_second:
+                            feature_event_list.append(event)
+
+                    if not feature_event_list:
+                        continue
+
+                    # Compute license usage curve (running checked-out number).
+                    sample_data = {}
+                    running_num = pre_running_num
+                    peak_in_use = pre_running_num
+                    out_count = 0
+                    out_licenses = 0
+                    user_set = set()
+                    host_set = set()
+                    area = 0.0
+                    first_second = None
+                    last_second = None
+                    prev_second = None
+                    prev_in_use = pre_running_num
+
+                    for event in feature_event_list:
+                        try:
+                            lic_num = int(event['lic_num'])
+                        except (TypeError, ValueError):
+                            lic_num = 1
+
+                        user_set.add(event['user'])
+                        host_set.add(event['host'])
+
+                        if prev_second is not None:
+                            area += prev_in_use * max(0, event['timestamp_second'] - prev_second)
+
+                        if event['event_type'] == 'OUT':
+                            running_num += lic_num
+                            out_count += 1
+                            out_licenses += lic_num
+                        else:
+                            running_num = max(0, running_num - lic_num)
+
+                        if first_second is None:
+                            first_second = event['timestamp_second']
+
+                        last_second = event['timestamp_second']
+                        prev_second = event['timestamp_second']
+                        prev_in_use = running_num
+
+                        if running_num > peak_in_use:
+                            peak_in_use = running_num
+
+                        sample_time = datetime.datetime.fromtimestamp(event['timestamp_second']).strftime('%Y%m%d_%H%M%S')
+                        sample_data.setdefault(sample_time, 0)
+                        sample_data[sample_time] = running_num
+
+                    # Duration weighted average license usage.
+                    if (last_second is not None) and (first_second is not None) and (last_second > first_second):
+                        avg_in_use = round(area / (last_second - first_second), 1)
+                    elif last_second is not None:
+                        avg_in_use = prev_in_use
+                    else:
+                        avg_in_use = 0
+
+                    curve_dic.setdefault(feature, {})
+                    curve_dic[feature].setdefault(license_server, {'sample_data': {}, 'summary': {}})
+                    curve_dic[feature][license_server]['sample_data'] = sample_data
+                    curve_dic[feature][license_server]['summary'] = {
+                                                                     'checkouts': out_count,
+                                                                     'licenses': out_licenses,
+                                                                     'avg_in_use': avg_in_use,
+                                                                     'peak_in_use': peak_in_use,
+                                                                     'users': len(user_set),
+                                                                     'hosts': len(host_set),
+                                                                    }
+
+        if not curve_dic:
+            common.bprint('No license log data is found.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
+
+        return curve_dic
+
+    def gen_log_curve_tab_table(self, curve_dic={}):
+        """
+        Generate self.log_curve_tab_table.
+        """
+        self.log_curve_tab_table.setShowGrid(True)
+        self.log_curve_tab_table.setSortingEnabled(True)
+        self.log_curve_tab_table.setColumnCount(0)
+        self.log_curve_tab_table.setColumnCount(7)
+        self.log_curve_tab_table_title_list = ['Feature', 'Server', 'Checkouts', 'Licenses', 'Avg_Use', 'Peak_Use', 'Users']
+        self.log_curve_tab_table.setHorizontalHeaderLabels(self.log_curve_tab_table_title_list)
+
+        self.log_curve_tab_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.log_curve_tab_table.setColumnWidth(1, 110)
+        self.log_curve_tab_table.setColumnWidth(2, 80)
+        self.log_curve_tab_table.setColumnWidth(3, 70)
+        self.log_curve_tab_table.setColumnWidth(4, 70)
+        self.log_curve_tab_table.setColumnWidth(5, 70)
+        self.log_curve_tab_table.setColumnWidth(6, 60)
+
+        # Set self.log_curve_tab_table row length.
+        row_length = 0
+
+        for feature in curve_dic.keys():
+            for license_server in curve_dic[feature].keys():
+                row_length += 1
+
+        self.log_curve_tab_table.setRowCount(0)
+        self.log_curve_tab_table.setRowCount(row_length)
+
+        # Fill self.log_curve_tab_table items.
+        if curve_dic:
+            i = -1
+
+            for feature in curve_dic.keys():
+                for license_server in curve_dic[feature].keys():
+                    summary_dic = curve_dic[feature][license_server]['summary']
+
+                    i += 1
+
+                    # Fill "Feature" item.
+                    item = QTableWidgetItem(feature)
+                    self.log_curve_tab_table.setItem(i, 0, item)
+
+                    # Fill "Server" item.
+                    item = QTableWidgetItem(license_server)
+                    self.log_curve_tab_table.setItem(i, 1, item)
+
+                    # Fill "Checkouts" item.
+                    item = QTableWidgetItem()
+                    item.setData(Qt.DisplayRole, summary_dic['checkouts'])
+                    self.log_curve_tab_table.setItem(i, 2, item)
+
+                    # Fill "Licenses" item.
+                    item = QTableWidgetItem()
+                    item.setData(Qt.DisplayRole, summary_dic['licenses'])
+                    self.log_curve_tab_table.setItem(i, 3, item)
+
+                    # Fill "Avg_Use" item.
+                    item = QTableWidgetItem()
+                    item.setData(Qt.DisplayRole, summary_dic['avg_in_use'])
+                    self.log_curve_tab_table.setItem(i, 4, item)
+
+                    # Fill "Peak_Use" item.
+                    item = QTableWidgetItem()
+                    item.setData(Qt.DisplayRole, summary_dic['peak_in_use'])
+                    self.log_curve_tab_table.setItem(i, 5, item)
+
+                    # Fill "Users" item.
+                    item = QTableWidgetItem()
+                    item.setData(Qt.DisplayRole, summary_dic['users'])
+                    self.log_curve_tab_table.setItem(i, 6, item)
+
+    def log_curve_tab_table_click(self, item=None):
+        """
+        If click feature name on self.log_curve_tab_table, jump to FEATURE tab and show feature related information.
+        """
+        if item:
+            if item.column() == 0:
+                current_row = self.log_curve_tab_table.currentRow()
+                feature = self.log_curve_tab_table.item(current_row, 0).text().strip()
+
+                self.set_feature_tab_server_combo()
+                self.set_feature_tab_vendor_combo()
+                self.feature_tab_feature_line.setText(feature)
+                self.filter_feature_tab_license_feature(get_license_info=False)
+                self.main_tab.setCurrentWidget(self.feature_tab)
+
+    def gen_log_curve_tab_frame1(self):
+        """
+        Generate self.log_curve_tab_frame1.
+        """
+        # self.log_curve_tab_frame1
+        self.log_curve_tab_canvas = common_pyqt5.FigureCanvasQTAgg()
+        self.log_curve_tab_toolbar = common_pyqt5.NavigationToolbar2QT(self.log_curve_tab_canvas, self)
+
+        if self.dark_mode:
+            fig = self.log_curve_tab_canvas.figure
+            fig.set_facecolor('#19232d')
+
+        # self.log_curve_tab_frame1 - Stats toggle button
+        self.log_curve_tab_stats_toggle_button = QPushButton('▼ Stats', self.log_curve_tab_frame1)
+        self.log_curve_tab_stats_toggle_button.setCheckable(True)
+        self.log_curve_tab_stats_toggle_button.setChecked(True)
+        self.log_curve_tab_stats_toggle_button.setMaximumHeight(20)
+        self.log_curve_tab_stats_toggle_button.setCursor(Qt.PointingHandCursor)
+        self.log_curve_tab_stats_toggle_button.setStyleSheet('''
+            QPushButton {
+                background-color: #2d3a4a;
+                color: #e0e0e0;
+                border: 1px solid #3a4a5a;
+                border-radius: 3px;
+                padding: 2px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #3a4a5a;
+            }
+        ''')
+        self.log_curve_tab_stats_toggle_button.clicked.connect(self.func_log_curve_tab_stats_toggle)
+
+        # self.log_curve_tab_frame1 - Stats panel
+        self.log_curve_tab_stats_frame = QFrame(self.log_curve_tab_frame1)
+        self.log_curve_tab_stats_frame.setStyleSheet('QFrame { background-color: #19232d; border: 1px solid #3a4a5a; border-radius: 4px; } QLabel { color: #e0e0e0; }')
+        self.log_curve_tab_stats_label = QLabel('', self.log_curve_tab_stats_frame)
+        self.log_curve_tab_stats_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.log_curve_tab_stats_label.setWordWrap(True)
+        self.log_curve_tab_stats_label.setStyleSheet('font-family: Consolas, "Courier New", monospace; font-size: 12px; padding: 6px;')
+        log_curve_tab_stats_grid = QGridLayout()
+        log_curve_tab_stats_grid.addWidget(self.log_curve_tab_stats_label, 0, 0)
+        log_curve_tab_stats_grid.setContentsMargins(2, 2, 2, 2)
+        self.log_curve_tab_stats_frame.setLayout(log_curve_tab_stats_grid)
+
+        # self.log_curve_tab_frame1 - Grid
+        log_curve_tab_frame1_grid = QGridLayout()
+        log_curve_tab_frame1_grid.addWidget(self.log_curve_tab_toolbar, 0, 0)
+        log_curve_tab_frame1_grid.addWidget(self.log_curve_tab_canvas, 1, 0)
+        log_curve_tab_frame1_grid.addWidget(self.log_curve_tab_stats_toggle_button, 2, 0)
+        log_curve_tab_frame1_grid.addWidget(self.log_curve_tab_stats_frame, 3, 0)
+        log_curve_tab_frame1_grid.setRowStretch(0, 0)
+        log_curve_tab_frame1_grid.setRowStretch(1, 1)
+        log_curve_tab_frame1_grid.setRowStretch(2, 0)
+        log_curve_tab_frame1_grid.setRowStretch(3, 0)
+        self.log_curve_tab_frame1.setLayout(log_curve_tab_frame1_grid)
+
+    def func_log_curve_tab_stats_toggle(self):
+        """
+        Toggle log_curve_tab_stats_frame visibility.
+        """
+        if self.log_curve_tab_stats_toggle_button.isChecked():
+            self.log_curve_tab_stats_toggle_button.setText('▼ Stats')
+            self.log_curve_tab_stats_frame.show()
+        else:
+            self.log_curve_tab_stats_toggle_button.setText('▶ Stats')
+            self.log_curve_tab_stats_frame.hide()
+
+    def update_log_curve_tab_frame1(self, curve_dic={}):
+        """
+        Generate self.log_curve_tab_frame1, aggregate matched features and draw curve.
+        """
+        # Generate fig.
+        fig = self.log_curve_tab_canvas.figure
+        fig.clear()
+        self.log_curve_tab_canvas.draw()
+
+        if not curve_dic:
+            return
+
+        # Print processing message.
+        common.bprint('Processing license log curve info ...', date_format='%Y-%m-%d %H:%M:%S')
+
+        my_show_message = ShowMessage('Info', 'Processing license log curve info, please wait a moment ...')
+        my_show_message.start()
+
+        # Get sample_time_list (aggregate across matched features and servers, same as CURVE tab).
+        sample_time_list = []
+
+        for feature in curve_dic.keys():
+            for license_server in curve_dic[feature].keys():
+                sample_time_list.extend(list(curve_dic[feature][license_server]['sample_data'].keys()))
+
+        sample_time_list = list(set(sample_time_list))
+        sample_time_list.sort()
+
+        # Get in_use list (aggregate per sample_time across all features).
+        in_use_list = []
+
+        for sample_time in sample_time_list:
+            total_in_use = 0
+
+            for feature in curve_dic.keys():
+                for license_server in curve_dic[feature].keys():
+                    if sample_time in curve_dic[feature][license_server]['sample_data'].keys():
+                        total_in_use += int(curve_dic[feature][license_server]['sample_data'][sample_time])
+
+            in_use_list.append(total_in_use)
+
+        my_show_message.terminate()
+
+        if sample_time_list and in_use_list:
+            # Update sample_time format.
+            for (i, sample_time) in enumerate(sample_time_list):
+                sample_time_list[i] = datetime.datetime.strptime(sample_time, '%Y%m%d_%H%M%S')
+
+            # Draw curve.
+            self.draw_log_curve_tab_curve(fig, sample_time_list, in_use_list, curve_dic)
+
+    def draw_log_curve_tab_curve(self, fig, sample_time_list, in_use_list, curve_dic={}):
+        """
+        Draw license usage curve from license log for specified feature(s).
+        """
+        fig.subplots_adjust(bottom=0.25)
+        axes = fig.add_subplot(111)
+
+        try:
+            work_start = float(self.log_curve_tab_work_start_edit.text().strip())
+        except (ValueError, AttributeError):
+            work_start = 9.0
+        try:
+            work_end = float(self.log_curve_tab_work_end_edit.text().strip())
+        except (ValueError, AttributeError):
+            work_end = 18.0
+        workday_only = hasattr(self, 'log_curve_tab_workday_checkbox') and self.log_curve_tab_workday_checkbox.isChecked()
+
+        def is_in_work_window(st_obj):
+            st_h = st_obj.hour + st_obj.minute / 60.0
+            if work_start <= work_end:
+                return work_start <= st_h < work_end
+            return st_h >= work_start or st_h < work_end
+
+        def is_workday(st_obj):
+            return st_obj.weekday() < 5
+
+        work_indices = []
+        work_in_use = []
+        all_in_use = []
+
+        for i, st in enumerate(sample_time_list):
+            all_in_use.append(in_use_list[i])
+
+            if is_in_work_window(st) and (not workday_only or is_workday(st)):
+                work_indices.append(i)
+                work_in_use.append(in_use_list[i])
+
+        def calc_stats(values, indices=None):
+            if not values:
+                return {'avg': 'N/A', 'peak': 'N/A', 'peak_time': None, 'min': 'N/A', 'min_time': None, 'count': 0}
+            total = sum(values)
+            peak_val = max(values)
+            min_val = min(values)
+            if indices is not None:
+                peak_global_idx = indices[values.index(peak_val)]
+                min_global_idx = indices[values.index(min_val)]
+            else:
+                peak_global_idx = values.index(peak_val)
+                min_global_idx = values.index(min_val)
+            return {
+                'avg': round(total / len(values), 1),
+                'peak': peak_val,
+                'peak_time': sample_time_list[peak_global_idx],
+                'min': min_val,
+                'min_time': sample_time_list[min_global_idx],
+                'count': len(values),
+            }
+
+        work_stats = calc_stats(work_in_use, work_indices)
+        all_stats = calc_stats(all_in_use)
+
+        # Aggregate summary information from curve_dic.
+        total_checkouts = 0
+        total_licenses = 0
+
+        for feature in curve_dic.keys():
+            for license_server in curve_dic[feature].keys():
+                total_checkouts += curve_dic[feature][license_server]['summary']['checkouts']
+                total_licenses += curve_dic[feature][license_server]['summary']['licenses']
+
+        unique_workdays = set()
+        for i in work_indices:
+            if hasattr(sample_time_list[i], 'date'):
+                unique_workdays.add(sample_time_list[i].date())
+
+        if sample_time_list:
+            st_min = sample_time_list[0]
+            st_max = sample_time_list[-1]
+            if hasattr(st_min, 'strftime'):
+                range_str = st_min.strftime('%Y-%m-%d') + '  ~  ' + st_max.strftime('%Y-%m-%d')
+            else:
+                range_str = str(st_min) + '  ~  ' + str(st_max)
+        else:
+            range_str = 'N/A'
+
+        def _fmt_time(t):
+            if hasattr(t, 'strftime'):
+                return t.strftime('%Y-%m-%d %H:%M')
+            return str(t)
+
+        work_start_str = ('%.2g' % work_start) if work_start != int(work_start) else str(int(work_start))
+        work_end_str = ('%.2g' % work_end) if work_end != int(work_end) else str(int(work_end))
+        workday_tag = '  +  Workday' if workday_only else ''
+
+        lines = []
+        lines.append('══════ Work Hours (%s - %s%s) ══════' % (work_start_str, work_end_str, workday_tag))
+        lines.append('  Avg Usage:    %s' % work_stats['avg'])
+        if work_stats['peak'] != 'N/A':
+            lines.append('  Peak Usage:   %s  @  %s' % (work_stats['peak'], _fmt_time(work_stats['peak_time'])))
+        if work_stats['min'] != 'N/A':
+            lines.append('  Valley Usage: %s  @  %s' % (work_stats['min'], _fmt_time(work_stats['min_time'])))
+        lines.append('  Valid Samples: %d points  (%d workdays)' % (work_stats['count'], len(unique_workdays)))
+        lines.append('')
+        lines.append('══════ All Day ══════')
+        lines.append('  Avg Usage:    %s' % all_stats['avg'])
+        if all_stats['peak'] != 'N/A':
+            lines.append('  Peak Usage:   %s  @  %s' % (all_stats['peak'], _fmt_time(all_stats['peak_time'])))
+        lines.append('  Total Samples: %d' % all_stats['count'])
+        lines.append('')
+        lines.append('══════ Overall Metrics ══════')
+        lines.append('  Peak Usage:       %s' % (max(all_in_use) if all_in_use else 'N/A'))
+        lines.append('  Total Checkouts:  %d' % total_checkouts)
+        lines.append('  Total Licenses:   %d' % total_licenses)
+        lines.append('  Feature Count:    %d' % len(curve_dic))
+        lines.append('  Data Range:       %s' % range_str)
+
+        stats_html = '<br>'.join(lines)
+        if hasattr(self, 'log_curve_tab_stats_label'):
+            self.log_curve_tab_stats_label.setText(stats_html)
+
+        if self.dark_mode:
+            axes.set_facecolor('#19232d')
+
+            for spine in axes.spines.values():
+                spine.set_color('white')
+
+            axes.tick_params(axis='both', colors='white')
+            axes.set_title('License Log Usage Curve', color='white')
+            axes.set_xlabel('Event Time', color='white')
+            axes.set_ylabel('In_Use Num', color='white')
+        else:
+            axes.set_title('License Log Usage Curve')
+            axes.set_xlabel('Event Time')
+            axes.set_ylabel('In_Use Num')
+
+        axes.plot(sample_time_list, in_use_list, 'go-', label='IN_USE', linewidth=0.1, markersize=0.1)
+        axes.fill_between(sample_time_list, 0, in_use_list, color='green', alpha=0.5)
+        axes.legend(loc='upper right')
+        axes.tick_params(axis='x', rotation=15)
+        axes.grid()
+        self.log_curve_tab_canvas.draw()
+
+    def export_log_curve_table(self):
+        self.export_table('log_curve', self.log_curve_tab_table, self.log_curve_tab_table_title_list)
+# For LOG CURVE TAB (end) #
+
 
 # For UTILIZATION TAB (start) #
     def gen_utilization_tab(self):

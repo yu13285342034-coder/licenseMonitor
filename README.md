@@ -50,5 +50,26 @@ Execute below command under install directory.
 ### 4. Sample
   - Sample EDA license information with tool bin/license_sample.
 
+### 5. LOG CURVE tab
+  - Show license usage curve parsed from license manager debug log (license.log).
+  - License servers and license log paths are specified manually in an init file,
+    one server per line with format:
+
+        MasterServer:/apps/eda/license.log
+
+  - The init file path is set by "license_log_server_init_file" in config/config.py,
+    default is config/others/license_log_server.init
+    (see config/others/license_log_server.init.example).
+  - The license log is read from the license server over SSH incrementally with
+    common/common_license_log.py, only new lines are parsed each time.
+  - The license usage data is saved as csv files together with the CURVE db data:
+
+        db/license_log/<license_server>/events.csv      (all OUT/IN events)
+        db/license_log/<license_server>/<feature>.csv   (per-feature usage curve,
+                                                         columns: sample_second, sample_time, in_use)
+
+  - Click "Check" on LOG CURVE tab to read the newest log, update the table
+    and draw the usage curve of one feature (same usage as CURVE tab).
+
 
 More details please see ["docs/licenseMonitor_user_manual.pdf"](./docs/licenseMonitor_user_manual.pdf)
