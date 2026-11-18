@@ -2,7 +2,6 @@ import os
 import re
 import pandas
 import socket
-import paramiko
 import datetime
 import getpass
 import subprocess
@@ -324,40 +323,77 @@ def write_csv(csv_file, content_dic):
 
 def ssh_client(host_name='', port=22, user_name=getpass.getuser(), password='', command='', reconnect=False, timeout=10):
     """
-    Ssh specified host, execute specified command, get stdout informaiton (return stdout_list).
+    Ssh specified host with the system ssh command (subprocess, the lowest
+    level ssh operation), execute specified command, get stdout information
+    (return stdout_list).
+
+    This function is designed to be safe for automatic tasks (for example
+    cron), ssh can never make the caller hang or wait for input:
+
+      - BatchMode=yes: ssh never prompts for password/passphrase, it fails
+        immediately when key authentication does not work.
+      - stdin=DEVNULL: the ssh child process can never read any input, so
+        there is no interactive password input any more.
+      - ConnectTimeout bounds the tcp connect and the subprocess timeout
+        bounds the whole command, therefore ssh_client is guaranteed to
+        return even if the network or the remote sshd hangs.
+
+    The "password/reconnect" arguments are kept for interface compatibility,
+    they are not used any more (only key based authentication is supported).
     """
     stdout_list = []
-    client = paramiko.SSHClient()
+
+    if (not host_name) or (not command):
+        bprint('Ssh host_name and command are required.', level='Error')
+        return stdout_list
+
+    ssh_command = [
+        'ssh',
+        '-p', str(port),
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=' + str(timeout),
+        '-o', 'StrictHostKeyChecking=accept-new',
+        str(user_name) + '@' + str(host_name),
+        str(command),
+    ]
+
+    # "timeout" bounds the tcp connect (ConnectTimeout), the subprocess
+    # timeout additionally bounds the whole command execution.
+    subprocess_timeout = int(timeout) + 30
 
     try:
-        client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(host_name, port, user_name, password=password, timeout=timeout)
+        completed_process = subprocess.run(
+            ssh_command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            errors='replace',
+            timeout=subprocess_timeout,
+        )
 
-        stdin, stdout, stderr = client.exec_command(command)
-        exit_status = stdout.channel.recv_exit_status()
-        result = stdout.read().decode()
-        stdout_list = str(result).splitlines()
-
-        if exit_status == 1:
-            bprint('Ssh connection is failed.', level='Error')
-    except paramiko.AuthenticationException:
-        bprint('Authentication failed.', level='Error')
-    except paramiko.SSHException as ssh_ex:
-        bprint('Ssh connection error: ' + str(ssh_ex), level='Error')
-    except socket.error as socket_error:
-        if not reconnect:
-            bprint('Ssh fail.', level='Warning')
-
-            password = getpass.getpass('            Please input password:')
-            ssh_client(host_name=host_name, port=22, user_name=user_name, password=password, command=command, reconnect=True)
+        if completed_process.returncode == 0:
+            stdout_list = str(completed_process.stdout).splitlines()
+        elif completed_process.returncode == 1:
+            # Remote command finished with exit status 1 (for example grep
+            # found no match), stdout is still a valid (usually empty) result.
+            stdout_list = str(completed_process.stdout).splitlines()
         else:
-            bprint('Socket error： ' + str(socket_error), level='Error')
+            # Ssh level failure (exit status 255 and so on): do not return
+            # partial output, let the caller treat it as a failed connection.
+            bprint('Ssh connection is failed on "' + str(user_name) + '@' + str(host_name) + '" (exit status: ' + str(completed_process.returncode) + ').', level='Error')
+
+            stderr_message = str(completed_process.stderr).strip()
+
+            if stderr_message:
+                bprint(stderr_message.splitlines()[0], color='red', display_method=1, indent=9)
+    except subprocess.TimeoutExpired:
+        bprint('Ssh timeout on "' + str(user_name) + '@' + str(host_name) + '" after ' + str(subprocess_timeout) + ' seconds.', level='Error')
+    except FileNotFoundError:
+        bprint('Ssh command is not found, please make sure "ssh" is installed on this host.', level='Error')
     except Exception as error:
         bprint('Meet below error when ssh ' + str(host_name), level='Error')
         bprint(error, color='red', display_method=1, indent=9)
-    finally:
-        client.close()
 
     return stdout_list
 
