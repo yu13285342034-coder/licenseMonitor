@@ -60,16 +60,42 @@ Execute below command under install directory.
   - The init file path is set by "license_log_server_init_file" in config/config.py,
     default is config/others/license_log_server.init
     (see config/others/license_log_server.init.example).
-  - The license log is read from the license server over SSH incrementally with
-    common/common_license_log.py, only new lines are parsed each time.
-  - The license usage data is saved as csv files together with the CURVE db data:
 
-        db/license_log/<license_server>/events.csv      (all OUT/IN events)
-        db/license_log/<license_server>/<feature>.csv   (per-feature usage curve,
-                                                         columns: sample_second, sample_time, in_use)
+#### 5.1 Split collector/GUI deployment (GUI host without SSH access)
 
-  - Click "Check" on LOG CURVE tab to read the newest log, update the table
-    and draw the usage curve of one feature (same usage as CURVE tab).
+The GUI host may have no SSH access to license servers (for example when the GUI
+runs on server A and only server B can reach the license servers).  LOG CURVE
+supports a split deployment:
+
+  - Collector host (server B, has SSH access to license servers): run
+    bin/license_sample with cron.  It reads every log listed in
+    license_log_server.init over SSH and stores OUT/IN events as csv data,
+    one directory per log file:
+
+        db/license_log/<log file name>/events.csv     (all OUT/IN events)
+        db/license_log/<log file name>/log_info.txt   (license_server/log_path marker)
+
+    When several entries use logs with the same file name, the server name is
+    appended to the directory name (for example license.log__MasterServer2).
+    Example cron entry on the collector host:
+
+        */10 * * * * /path/to/licenseMonitor/bin/license_sample -u -U
+
+  - GUI host (server A): LOG CURVE tab reads the stored csv data directly and
+    never connects to license servers over SSH.  The tab lists both the license
+    servers and the license logs (multi-select "Server" and "Log" filters), and
+    the result table shows a "Log" column for each feature/server row.
+
+  - db_path must be visible to both hosts (shared NFS mount, or the collector
+    copies db/license_log to the GUI host regularly).
+
+#### 5.2 Same-host deployment
+
+When the GUI host itself has SSH access to license servers, the collector and
+the GUI may run on the same host and everything above works without any change.
+
+  - Click "Check" on LOG CURVE tab to load the stored license log data, update
+    the table and draw the usage curve of one feature (same usage as CURVE tab).
 
 
 More details please see ["docs/licenseMonitor_user_manual.pdf"](./docs/licenseMonitor_user_manual.pdf)

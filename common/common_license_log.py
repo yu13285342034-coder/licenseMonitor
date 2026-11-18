@@ -14,6 +14,7 @@ import time
 import base64
 import getpass
 import shlex
+import csv
 import datetime
 
 import yaml
@@ -721,6 +722,158 @@ class LicenseLogParser():
             full_datetime = full_datetime - datetime.timedelta(days=1)
 
         return int(time.mktime(full_datetime.timetuple()))
+
+    # ----------------------------------------------------------------------
+    # Shared LOG CURVE data helpers.
+    #
+    # A collector host (cron "license_sample") reads license.log over SSH and
+    # stores events into db_path/license_log/<log name>/events.csv (one
+    # directory per log file, plus a log_info.txt marker).  The GUI host reads
+    # these csv files directly, so it never needs SSH access to license
+    # servers.
+    # ----------------------------------------------------------------------
+
+    # events.csv columns.  Older files only contain the first 8 columns and
+    # are still accepted by load_events_csv().
+    EVENT_CSV_TITLE_LIST = ['timestamp_second', 'timestamp_str', 'event_type', 'vendor', 'feature', 'user', 'host', 'lic_num', 'license_server', 'log_path']
+
+    @staticmethod
+    def get_event_signature(event):
+        """
+        Get a unique signature for one license log event (used for csv dedup).
+        """
+        try:
+            lic_num = int(event.get('lic_num', 1))
+        except (TypeError, ValueError):
+            lic_num = 1
+
+        try:
+            timestamp_second = int(event.get('timestamp_second', 0))
+        except (TypeError, ValueError):
+            timestamp_second = 0
+
+        return (timestamp_second, str(event.get('event_type', '')).upper(), str(event.get('feature', '')), str(event.get('user', '')), str(event.get('host', '')), lic_num)
+
+    @classmethod
+    def merge_event_lists(cls, stored_event_list=[], new_event_list=[]):
+        """
+        Merge new events into stored events, skip events which are already
+        stored (protects against duplicated reads after crash or rotation).
+        """
+        signature_set = set()
+
+        for event in stored_event_list:
+            signature_set.add(cls.get_event_signature(event))
+
+        merged_event_list = list(stored_event_list)
+
+        for event in new_event_list:
+            signature = cls.get_event_signature(event)
+
+            if signature not in signature_set:
+                signature_set.add(signature)
+                merged_event_list.append(event)
+
+        return merged_event_list
+
+    def get_log_store_dir_name(self, license_server, log_path):
+        """
+        Get the store directory name for one license log.
+
+        The directory is named after the log file name (for example
+        "license.log").  When several entries use logs with the same file
+        name, the server name (and a counter if necessary) is appended to
+        keep directory names unique.
+        """
+        if not hasattr(self, '_log_store_name_dic'):
+            self._log_store_name_dic = {}
+
+        log_path = str(log_path)
+        base_name = os.path.basename(log_path.rstrip('/\\').strip()) or 'license.log'
+        base_store_name = re.sub(r'[^A-Za-z0-9._-]', '_', base_name) or 'license.log'
+        used_paths = self._log_store_name_dic.setdefault(base_store_name, [])
+
+        if log_path in used_paths:
+            return base_store_name
+
+        if not used_paths:
+            used_paths.append(log_path)
+            return base_store_name
+
+        server_suffix = re.sub(r'[^A-Za-z0-9._-]', '_', str(license_server)) or 'server'
+        candidate = base_store_name + '__' + server_suffix
+        index = 2
+
+        while candidate in self._log_store_name_dic and (log_path not in self._log_store_name_dic[candidate]):
+            candidate = base_store_name + '__' + server_suffix + '__' + str(index)
+            index += 1
+
+        self._log_store_name_dic.setdefault(candidate, []).append(log_path)
+
+        return candidate
+
+    @classmethod
+    def load_events_csv(cls, events_csv_file):
+        """
+        Load stored license log events from csv file.
+
+        Both the old 8-column format (GUI only) and the new 10-column format
+        (with license_server/log_path) are accepted.
+        """
+        event_list = []
+
+        if (not events_csv_file) or (not os.path.exists(events_csv_file)):
+            return event_list
+
+        try:
+            with open(events_csv_file, 'r', encoding='utf-8', newline='') as events_csv:
+                csv_reader = csv.DictReader(events_csv)
+
+                for row in csv_reader:
+                    try:
+                        timestamp_second = int(row.get('timestamp_second', 0))
+                    except (TypeError, ValueError):
+                        continue
+
+                    try:
+                        lic_num = str(int(row.get('lic_num', '1')))
+                    except (TypeError, ValueError):
+                        lic_num = '1'
+
+                    event_list.append({
+                                       'timestamp_second': timestamp_second,
+                                       'timestamp_str': str(row.get('timestamp_str', '')),
+                                       'event_type': str(row.get('event_type', '')).upper(),
+                                       'vendor': str(row.get('vendor', '')),
+                                       'feature': str(row.get('feature', '')),
+                                       'user': str(row.get('user', '')),
+                                       'host': str(row.get('host', '')),
+                                       'lic_num': lic_num,
+                                       'license_server': str(row.get('license_server', '')),
+                                       'log_path': str(row.get('log_path', '')),
+                                      })
+        except Exception as error:
+            common.bprint('Failed on loading license log events csv "' + str(events_csv_file) + '".', level='Warning')
+            common.bprint(error, color='yellow', display_method=1, indent=9)
+
+        return event_list
+
+    @classmethod
+    def write_events_csv(cls, events_csv_file, event_list=[]):
+        """
+        Write license log events into csv file (10 columns).
+        """
+        events_dir = os.path.dirname(os.path.abspath(events_csv_file))
+
+        if events_dir and (not os.path.exists(events_dir)):
+            os.makedirs(events_dir, mode=0o755, exist_ok=True)
+
+        with open(events_csv_file, 'w', encoding='utf-8', newline='') as events_csv:
+            csv_writer = csv.writer(events_csv)
+            csv_writer.writerow(cls.EVENT_CSV_TITLE_LIST)
+
+            for event in event_list:
+                csv_writer.writerow([event['timestamp_second'], event['timestamp_str'], event['event_type'], event['vendor'], event['feature'], event['user'], event['host'], event['lic_num'], event.get('license_server', ''), event.get('log_path', '')])
 
     def parse_log_line(self, line):
         """Parse one line when its date is already known or embeds a date."""

@@ -2442,9 +2442,12 @@ licenseMonitor is an open source software for EDA software license information d
 
         License servers and license log paths are specified manually in an init
         file, one server per line with format "ServerName:/path/to/license.log".
-        Each license log is read from its license server over SSH with
-        common_license_log.  A separate state directory (config.db_path/license_log)
-        is used so LOG CURVE never interferes with license_sample sampling.
+        The log data itself is NOT read over SSH here: it is read from
+        db_path/license_log/<log name>/events.csv files written by the collector
+        (cron "license_sample" on a host which has SSH access to license
+        servers), so this GUI host does not need SSH access.  A separate state
+        directory (config.db_path/license_log) is used so LOG CURVE never
+        interferes with license_sample sampling.
         """
         self.log_curve_parser = None
 
@@ -2554,8 +2557,13 @@ licenseMonitor is an open source software for EDA software license information d
         self.log_curve_tab_end_date_edit.setCalendarPopup(True)
         self.log_curve_tab_end_date_edit.setDate(QDate.currentDate())
 
-        # Empty label
-        log_curve_tab_empty_label = QLabel('', self.log_curve_tab_frame0)
+        # License Log (from license log init file and stored collector data)
+        log_curve_tab_log_label = QLabel('Log', self.log_curve_tab_frame0)
+        log_curve_tab_log_label.setStyleSheet('font-weight: bold;')
+        log_curve_tab_log_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.log_curve_tab_log_combo = common_pyqt5.QComboCheckBox(self.log_curve_tab_frame0)
+        self.set_log_curve_tab_log_combo()
 
         # Export button
         log_curve_tab_export_button = QPushButton('Export', self.log_curve_tab_frame0)
@@ -2567,16 +2575,17 @@ licenseMonitor is an open source software for EDA software license information d
 
         log_curve_tab_frame0_grid.addWidget(log_curve_tab_server_label, 0, 0)
         log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_server_combo, 0, 1)
-        log_curve_tab_frame0_grid.addWidget(log_curve_tab_feature_label, 0, 2)
-        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_feature_line, 0, 3)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_log_label, 0, 2)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_log_combo, 0, 3)
         log_curve_tab_frame0_grid.addWidget(log_curve_tab_check_button, 0, 4)
-        log_curve_tab_frame0_grid.addWidget(log_curve_tab_empty_label, 0, 5)
-        log_curve_tab_frame0_grid.addWidget(log_curve_tab_export_button, 0, 6)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_export_button, 0, 5)
 
-        log_curve_tab_frame0_grid.addWidget(log_curve_tab_begin_date_label, 1, 0)
-        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_begin_date_edit, 1, 1)
-        log_curve_tab_frame0_grid.addWidget(log_curve_tab_end_date_label, 1, 2)
-        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_end_date_edit, 1, 3)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_feature_label, 1, 0)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_feature_line, 1, 1)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_begin_date_label, 1, 2)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_begin_date_edit, 1, 3)
+        log_curve_tab_frame0_grid.addWidget(log_curve_tab_end_date_label, 1, 4)
+        log_curve_tab_frame0_grid.addWidget(self.log_curve_tab_end_date_edit, 1, 5)
         log_curve_tab_frame0_grid.addWidget(log_curve_tab_export_button, 1, 6)
 
         # Work hours filter for statistics.
@@ -2630,7 +2639,9 @@ licenseMonitor is an open source software for EDA software license information d
 
     def filter_log_curve_tab(self):
         """
-        Read license log over SSH, update self.log_curve_tab_table and self.log_curve_tab_frame1.
+        Read stored license log data (written by cron "license_sample" on the
+        collector host), update self.log_curve_tab_table and
+        self.log_curve_tab_frame1.
         """
         if not self.log_curve_parser:
             common.bprint('LOG CURVE tab is not configured, please check "license_log_server_init_file" in config.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
@@ -2640,16 +2651,18 @@ licenseMonitor is an open source software for EDA software license information d
             common.bprint('No license server is specified in license log init file, nothing to check.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
             return
 
-        common.bprint('Reading license log info ...', date_format='%Y-%m-%d %H:%M:%S')
+        common.bprint('Reading stored license log data ...', date_format='%Y-%m-%d %H:%M:%S')
 
-        my_show_message = ShowMessage('Info', 'Reading license log info, please wait a moment ...')
+        my_show_message = ShowMessage('Info', 'Reading stored license log data, please wait a moment ...')
         my_show_message.start()
 
-        events_dic = self.read_license_log_events()
-        all_events_dic = self.store_license_log_events(events_dic)
+        all_events_dic = self.read_stored_license_log_events()
         curve_dic = self.get_log_curve_info(all_events_dic)
 
         my_show_message.terminate()
+
+        if not all_events_dic:
+            common.bprint('No stored license log data is found under db_path/license_log, please make sure cron "license_sample" runs on the collector server (which has SSH access to license servers) and db_path is shared with this host.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
 
         # Update feature completer with features from license log.
         log_feature_list = []
@@ -2665,226 +2678,129 @@ licenseMonitor is an open source software for EDA software license information d
         self.gen_log_curve_tab_table(curve_dic)
         self.update_log_curve_tab_frame1(curve_dic)
 
-    def read_license_log_events(self):
+    def get_stored_license_log_info(self):
         """
-        Read new OUT/IN events of each license server log over SSH with
-        common_license_log.  Only new events (incremental offset is saved in
-        db) are returned.
+        Get stored license log info written by the collector (cron
+        "license_sample"): db_path/license_log/<log name>/log_info.txt.
+
+        Return {store_dir_name: log_path}.  Legacy server directories written
+        by old GUI versions (without log_info.txt) map to ''.
+        """
+        log_info_dic = {}
+        license_log_db_path = ''
+
+        if (hasattr(config, 'db_path')) and config.db_path:
+            license_log_db_path = str(config.db_path) + '/license_log'
+
+        if (not license_log_db_path) or (not os.path.exists(license_log_db_path)):
+            return log_info_dic
+
+        for entry_name in sorted(os.listdir(license_log_db_path)):
+            entry_path = license_log_db_path + '/' + str(entry_name)
+
+            if not os.path.isdir(entry_path):
+                continue
+
+            log_info_file = entry_path + '/log_info.txt'
+            log_path = ''
+
+            if os.path.exists(log_info_file):
+                try:
+                    with open(log_info_file, 'r', encoding='utf-8') as log_info:
+                        for line in log_info:
+                            if line.startswith('log_path='):
+                                log_path = line.split('=', 1)[1].strip()
+                                break
+                except Exception:
+                    log_path = ''
+
+            log_info_dic[str(entry_name)] = log_path
+
+        return log_info_dic
+
+    def read_stored_license_log_events(self):
+        """
+        Read license log events stored by the collector under
+        db_path/license_log/<log name>/events.csv.  The GUI host does not need
+        SSH access to license servers.  Return {license_server: [event, ...]}.
         """
         events_dic = {}
 
-        if not self.log_curve_parser:
+        if (not hasattr(config, 'db_path')) or (not config.db_path):
             return events_dic
 
-        for license_server in sorted(self.log_curve_parser.log_dic.keys()):
-            try:
-                event_list = self.log_curve_parser.get_log_events(license_server)
-            except Exception as error:
-                common.bprint('Failed on reading license log for server "' + str(license_server) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
-                common.bprint(error, color='yellow', display_method=1, indent=9)
-                event_list = []
+        license_log_db_path = str(config.db_path) + '/license_log'
 
-            if event_list:
-                common.bprint('Collected ' + str(len(event_list)) + ' new license log events for server "' + str(license_server) + '".', date_format='%Y-%m-%d %H:%M:%S')
+        if not os.path.exists(license_log_db_path):
+            return events_dic
 
-            events_dic.setdefault(license_server, []).extend(event_list)
+        selected_license_server_dic = self.log_curve_tab_server_combo.selectedItems()
+        selected_license_server_list = list(selected_license_server_dic.values())
+        selected_log_dic = self.log_curve_tab_log_combo.selectedItems()
+        selected_log_list = list(selected_log_dic.values())
+        log_info_dic = self.get_stored_license_log_info()
+
+        for store_name in sorted(log_info_dic.keys()):
+            events_csv_file = license_log_db_path + '/' + str(store_name) + '/events.csv'
+
+            if not os.path.exists(events_csv_file):
+                continue
+
+            event_list = common_license_log.LicenseLogParser.load_events_csv(events_csv_file)
+
+            if not event_list:
+                continue
+
+            filtered_event_list = []
+
+            for event in event_list:
+                # csv files written by old GUI versions have no
+                # license_server/log_path columns; fall back to the directory
+                # name (server) and log_info.txt.
+                if not event.get('license_server'):
+                    event['license_server'] = str(store_name)
+
+                if not event.get('log_path'):
+                    event['log_path'] = log_info_dic[store_name]
+
+                if ('ALL' not in selected_license_server_list) and (event['license_server'] not in selected_license_server_list):
+                    continue
+
+                if selected_log_list and ('ALL' not in selected_log_list) and (event['log_path'] not in selected_log_list):
+                    continue
+
+                filtered_event_list.append(event)
+
+            if not filtered_event_list:
+                continue
+
+            filtered_event_list.sort(key=lambda event: event['timestamp_second'])
+
+            for event in filtered_event_list:
+                events_dic.setdefault(event['license_server'], []).append(event)
 
         return events_dic
 
-    def store_license_log_events(self, events_dic={}):
+    def set_log_curve_tab_log_combo(self):
         """
-        Merge new license log events into csv file
-        db/license_log/<license_server>/events.csv, and update per-feature
-        usage curve csv files (same style as CURVE db data, but in csv format).
-        Return all stored events for each license server.
+        Set (initialize) self.log_curve_tab_log_combo with license logs from
+        license_log_server.init and from stored collector data.
         """
-        all_events_dic = {}
-        new_feature_dic = {}
-        store_failed = False
+        log_path_list = []
 
-        for license_server in sorted(events_dic.keys()):
-            events_csv_file = str(config.db_path) + '/license_log/' + str(license_server) + '/events.csv'
-            stored_event_list = self.load_license_log_events_csv(events_csv_file)
+        if self.log_curve_parser:
+            for log_path in self.log_curve_parser.log_dic.values():
+                if log_path and (log_path not in log_path_list):
+                    log_path_list.append(log_path)
 
-            if events_dic[license_server]:
-                stored_event_list = self.merge_license_log_events(stored_event_list, events_dic[license_server])
-                stored_event_list.sort(key=lambda event: event['timestamp_second'])
+        for log_path in self.get_stored_license_log_info().values():
+            if log_path and (log_path not in log_path_list):
+                log_path_list.append(log_path)
 
-                try:
-                    os.makedirs(os.path.dirname(events_csv_file), mode=0o755, exist_ok=True)
-                    self.write_license_log_events_csv(events_csv_file, stored_event_list)
+        log_path_list.sort()
+        log_path_list.insert(0, 'ALL')
 
-                    for event in events_dic[license_server]:
-                        if event['feature'] not in new_feature_dic.setdefault(license_server, []):
-                            new_feature_dic[license_server].append(event['feature'])
-                except Exception as error:
-                    store_failed = True
-                    common.bprint('Failed on storing license log events into "' + str(events_csv_file) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
-                    common.bprint(error, color='yellow', display_method=1, indent=9)
-
-            all_events_dic[license_server] = stored_event_list
-
-        if (not store_failed) and self.log_curve_parser:
-            # Only commit log offsets after events are stored successfully,
-            # otherwise the events will be read again next time.
-            self.log_curve_parser.commit_log_state()
-
-        # Update per-feature curve csv files for features with new events.
-        for license_server in sorted(new_feature_dic.keys()):
-            self.update_log_curve_feature_csv(license_server, new_feature_dic[license_server], all_events_dic.get(license_server, []))
-
-        return all_events_dic
-
-    @staticmethod
-    def get_license_log_event_signature(event):
-        """
-        Get a unique signature for one license log event (for csv dedup).
-        """
-        try:
-            lic_num = int(event.get('lic_num', 1))
-        except (TypeError, ValueError):
-            lic_num = 1
-
-        try:
-            timestamp_second = int(event.get('timestamp_second', 0))
-        except (TypeError, ValueError):
-            timestamp_second = 0
-
-        return (timestamp_second, str(event.get('event_type', '')).upper(), str(event.get('feature', '')), str(event.get('user', '')), str(event.get('host', '')), lic_num)
-
-    def merge_license_log_events(self, stored_event_list=[], new_event_list=[]):
-        """
-        Merge new events into stored events, skip events which are already
-        stored (protects against duplicated reads after crash or log rotation).
-        """
-        signature_set = set()
-
-        for event in stored_event_list:
-            signature_set.add(self.get_license_log_event_signature(event))
-
-        merged_event_list = list(stored_event_list)
-
-        for event in new_event_list:
-            signature = self.get_license_log_event_signature(event)
-
-            if signature not in signature_set:
-                signature_set.add(signature)
-                merged_event_list.append(event)
-
-        return merged_event_list
-
-    def load_license_log_events_csv(self, events_csv_file):
-        """
-        Load stored license log events from csv file.
-        """
-        event_list = []
-
-        if not os.path.exists(events_csv_file):
-            return event_list
-
-        try:
-            with open(events_csv_file, 'r', encoding='utf-8', newline='') as events_csv:
-                csv_reader = csv.DictReader(events_csv)
-
-                for row in csv_reader:
-                    try:
-                        timestamp_second = int(row.get('timestamp_second', 0))
-                    except (TypeError, ValueError):
-                        continue
-
-                    try:
-                        lic_num = str(int(row.get('lic_num', '1')))
-                    except (TypeError, ValueError):
-                        lic_num = '1'
-
-                    event_list.append({
-                                       'timestamp_second': timestamp_second,
-                                       'timestamp_str': str(row.get('timestamp_str', '')),
-                                       'event_type': str(row.get('event_type', '')).upper(),
-                                       'vendor': str(row.get('vendor', '')),
-                                       'feature': str(row.get('feature', '')),
-                                       'user': str(row.get('user', '')),
-                                       'host': str(row.get('host', '')),
-                                       'lic_num': lic_num,
-                                      })
-        except Exception as error:
-            common.bprint('Failed on loading license log events csv "' + str(events_csv_file) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
-            common.bprint(error, color='yellow', display_method=1, indent=9)
-
-        return event_list
-
-    def write_license_log_events_csv(self, events_csv_file, event_list=[]):
-        """
-        Write license log events into csv file.
-        """
-        title_list = ['timestamp_second', 'timestamp_str', 'event_type', 'vendor', 'feature', 'user', 'host', 'lic_num']
-
-        with open(events_csv_file, 'w', encoding='utf-8', newline='') as events_csv:
-            csv_writer = csv.writer(events_csv)
-            csv_writer.writerow(title_list)
-
-            for event in event_list:
-                csv_writer.writerow([event['timestamp_second'], event['timestamp_str'], event['event_type'], event['vendor'], event['feature'], event['user'], event['host'], event['lic_num']])
-
-    def update_log_curve_feature_csv(self, license_server, feature_list=[], stored_event_list=[]):
-        """
-        Save per-feature license usage curve into csv file
-        db/license_log/<license_server>/<feature>.csv with columns
-        "sample_second/sample_time/in_use" (same style as CURVE tab usage.db
-        sample data, but in csv format, stored together under config.db_path).
-        """
-        if not feature_list:
-            return
-
-        server_db_path = str(config.db_path) + '/license_log/' + str(license_server)
-
-        try:
-            os.makedirs(server_db_path, mode=0o755, exist_ok=True)
-        except Exception as error:
-            common.bprint('Failed on creating directory "' + str(server_db_path) + '" for license log csv data.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
-            common.bprint(error, color='yellow', display_method=1, indent=9)
-            return
-
-        for feature in feature_list:
-            feature_event_list = []
-
-            for event in stored_event_list:
-                if event['feature'] == feature:
-                    feature_event_list.append(event)
-
-            if not feature_event_list:
-                continue
-
-            feature_event_list.sort(key=lambda event: event['timestamp_second'])
-
-            running_num = 0
-            row_list = []
-
-            for event in feature_event_list:
-                try:
-                    lic_num = int(event['lic_num'])
-                except (TypeError, ValueError):
-                    lic_num = 1
-
-                if event['event_type'] == 'OUT':
-                    running_num += lic_num
-                else:
-                    running_num = max(0, running_num - lic_num)
-
-                sample_time = datetime.datetime.fromtimestamp(event['timestamp_second']).strftime('%Y%m%d_%H%M%S')
-                row_list.append([event['timestamp_second'], sample_time, running_num])
-
-            # Feature name may contain characters which are not allowed in a file name.
-            feature_csv_file = str(server_db_path) + '/' + re.sub(r'[^A-Za-z0-9._-]', '_', feature) + '.csv'
-
-            try:
-                with open(feature_csv_file, 'w', encoding='utf-8', newline='') as feature_csv:
-                    csv_writer = csv.writer(feature_csv)
-                    csv_writer.writerow(['sample_second', 'sample_time', 'in_use'])
-                    csv_writer.writerows(row_list)
-            except Exception as error:
-                common.bprint('Failed on writing license log curve csv "' + str(feature_csv_file) + '".', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
-                common.bprint(error, color='yellow', display_method=1, indent=9)
+        self.set_common_checkbox_combo(self.log_curve_tab_log_combo, log_path_list)
 
     def get_log_curve_info(self, all_events_dic={}):
         """
@@ -2903,6 +2819,8 @@ licenseMonitor is an open source software for EDA software license information d
 
         selected_license_server_dic = self.log_curve_tab_server_combo.selectedItems()
         selected_license_server_list = list(selected_license_server_dic.values())
+        selected_log_dic = self.log_curve_tab_log_combo.selectedItems()
+        selected_log_list = list(selected_log_dic.values())
         specified_license_feature = self.log_curve_tab_feature_line.text().strip()
 
         # Collect all feature names from license log events.
@@ -2911,6 +2829,9 @@ licenseMonitor is an open source software for EDA software license information d
         for license_server in all_events_dic.keys():
             if ('ALL' in selected_license_server_list) or (license_server in selected_license_server_list):
                 for event in all_events_dic[license_server]:
+                    if selected_log_list and ('ALL' not in selected_log_list) and (event.get('log_path', '') not in selected_log_list):
+                        continue
+
                     if event['feature'] not in feature_list:
                         feature_list.append(event['feature'])
 
@@ -2934,8 +2855,13 @@ licenseMonitor is an open source software for EDA software license information d
                     server_feature_all_list = []
 
                     for event in all_events_dic[license_server]:
-                        if event['feature'] == feature:
-                            server_feature_all_list.append(event)
+                        if event['feature'] != feature:
+                            continue
+
+                        if selected_log_list and ('ALL' not in selected_log_list) and (event.get('log_path', '') not in selected_log_list):
+                            continue
+
+                        server_feature_all_list.append(event)
 
                     server_feature_all_list.sort(key=lambda event: event['timestamp_second'])
 
@@ -3022,6 +2948,12 @@ licenseMonitor is an open source software for EDA software license information d
                     else:
                         avg_in_use = 0
 
+                    log_set = set()
+
+                    for event in feature_event_list:
+                        if event.get('log_path'):
+                            log_set.add(event['log_path'])
+
                     curve_dic.setdefault(feature, {})
                     curve_dic[feature].setdefault(license_server, {'sample_data': {}, 'summary': {}})
                     curve_dic[feature][license_server]['sample_data'] = sample_data
@@ -3032,6 +2964,7 @@ licenseMonitor is an open source software for EDA software license information d
                                                                      'peak_in_use': peak_in_use,
                                                                      'users': len(user_set),
                                                                      'hosts': len(host_set),
+                                                                     'logs': ', '.join(sorted(log_set)),
                                                                     }
 
         if not curve_dic:
@@ -3046,17 +2979,18 @@ licenseMonitor is an open source software for EDA software license information d
         self.log_curve_tab_table.setShowGrid(True)
         self.log_curve_tab_table.setSortingEnabled(True)
         self.log_curve_tab_table.setColumnCount(0)
-        self.log_curve_tab_table.setColumnCount(7)
-        self.log_curve_tab_table_title_list = ['Feature', 'Server', 'Checkouts', 'Licenses', 'Avg_Use', 'Peak_Use', 'Users']
+        self.log_curve_tab_table.setColumnCount(8)
+        self.log_curve_tab_table_title_list = ['Feature', 'Server', 'Log', 'Checkouts', 'Licenses', 'Avg_Use', 'Peak_Use', 'Users']
         self.log_curve_tab_table.setHorizontalHeaderLabels(self.log_curve_tab_table_title_list)
 
         self.log_curve_tab_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.log_curve_tab_table.setColumnWidth(1, 110)
-        self.log_curve_tab_table.setColumnWidth(2, 80)
-        self.log_curve_tab_table.setColumnWidth(3, 70)
+        self.log_curve_tab_table.setColumnWidth(2, 220)
+        self.log_curve_tab_table.setColumnWidth(3, 80)
         self.log_curve_tab_table.setColumnWidth(4, 70)
         self.log_curve_tab_table.setColumnWidth(5, 70)
-        self.log_curve_tab_table.setColumnWidth(6, 60)
+        self.log_curve_tab_table.setColumnWidth(6, 70)
+        self.log_curve_tab_table.setColumnWidth(7, 60)
 
         # Set self.log_curve_tab_table row length.
         row_length = 0
@@ -3086,30 +3020,34 @@ licenseMonitor is an open source software for EDA software license information d
                     item = QTableWidgetItem(license_server)
                     self.log_curve_tab_table.setItem(i, 1, item)
 
+                    # Fill "Log" item.
+                    item = QTableWidgetItem(str(summary_dic.get('logs', '')))
+                    self.log_curve_tab_table.setItem(i, 2, item)
+
                     # Fill "Checkouts" item.
                     item = QTableWidgetItem()
                     item.setData(Qt.DisplayRole, summary_dic['checkouts'])
-                    self.log_curve_tab_table.setItem(i, 2, item)
+                    self.log_curve_tab_table.setItem(i, 3, item)
 
                     # Fill "Licenses" item.
                     item = QTableWidgetItem()
                     item.setData(Qt.DisplayRole, summary_dic['licenses'])
-                    self.log_curve_tab_table.setItem(i, 3, item)
+                    self.log_curve_tab_table.setItem(i, 4, item)
 
                     # Fill "Avg_Use" item.
                     item = QTableWidgetItem()
                     item.setData(Qt.DisplayRole, summary_dic['avg_in_use'])
-                    self.log_curve_tab_table.setItem(i, 4, item)
+                    self.log_curve_tab_table.setItem(i, 5, item)
 
                     # Fill "Peak_Use" item.
                     item = QTableWidgetItem()
                     item.setData(Qt.DisplayRole, summary_dic['peak_in_use'])
-                    self.log_curve_tab_table.setItem(i, 5, item)
+                    self.log_curve_tab_table.setItem(i, 6, item)
 
                     # Fill "Users" item.
                     item = QTableWidgetItem()
                     item.setData(Qt.DisplayRole, summary_dic['users'])
-                    self.log_curve_tab_table.setItem(i, 6, item)
+                    self.log_curve_tab_table.setItem(i, 7, item)
 
     def log_curve_tab_table_click(self, item=None):
         """
