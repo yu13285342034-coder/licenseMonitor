@@ -36,7 +36,7 @@ def gen_shell_tools():
     """
     Generate shell scripts under <LICENSE_MONITOR_INSTALL_PATH>/tools.
     """
-    tool_list = ['bin/license_monitor', 'bin/license_sample', 'tools/collect_feature_record_from_license_log', 'tools/config_product_feature_relationship', 'tools/gen_LM_LICENSE_FILE', 'tools/get_license_log', 'tools/get_product_feature_relationship', 'tools/patch', 'tools/seedb', 'tools/show_license_log_info', 'tools/update_product_feature_relationship', 'tools/update_project_execute_host_with_lsf', 'tools/view_product_feature_relationship']
+    tool_list = ['bin/license_monitor', 'bin/license_sample', 'tools/collect_feature_record_from_license_log', 'tools/collect_license_log', 'tools/config_product_feature_relationship', 'tools/gen_LM_LICENSE_FILE', 'tools/get_license_log', 'tools/get_product_feature_relationship', 'tools/patch', 'tools/seedb', 'tools/show_license_log_info', 'tools/update_product_feature_relationship', 'tools/update_project_execute_host_with_lsf', 'tools/view_product_feature_relationship']
 
     for tool_name in tool_list:
         tool = str(CWD) + '/' + str(tool_name)

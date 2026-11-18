@@ -68,7 +68,9 @@ runs on server A and only server B can reach the license servers).  LOG CURVE
 supports a split deployment:
 
   - Collector host (server B, has SSH access to license servers): run
-    bin/license_sample with cron.  It reads every log listed in
+    tools/collect_license_log with cron (kept separate from bin/license_sample
+    so log reading never slows down the lmstat sampling).  It reads every log
+    listed in
     license_log_server.init over SSH and stores OUT/IN events as csv data,
     one directory per log file:
 
@@ -79,7 +81,7 @@ supports a split deployment:
     appended to the directory name (for example license.log__MasterServer2).
     Example cron entry on the collector host:
 
-        */10 * * * * /path/to/licenseMonitor/bin/license_sample -u -U
+        */10 * * * * /path/to/licenseMonitor/tools/collect_license_log
 
   - GUI host (server A): LOG CURVE tab reads the stored csv data directly and
     never connects to license servers over SSH.  The tab lists both the license

@@ -213,100 +213,6 @@ class Sampling:
                 self.vprint('    Collected ' + str(len(events)) + ' new OUT/IN events for server "' + str(license_server) + '" from license.log.')
                 self.log_events_dic.setdefault(license_server, []).extend(events)
 
-    def init_log_curve_parser(self):
-        """
-        Initialize parser for LOG CURVE data collection.
-
-        Reads config/others/license_log_server.init ("Server:/path/to/log"
-        lines, the same file used by the GUI LOG CURVE tab).  This step is
-        intended to run on the collector host (for example via cron), which
-        has SSH access to the license servers.  Collected data is stored into
-        db_path/license_log/<log file name>/ so the GUI host can display LOG
-        CURVE without any SSH access.
-        """
-        self.log_curve_parser = None
-
-        if (not hasattr(config, 'db_path')) or (not config.db_path):
-            return
-
-        install_path = str(os.environ.get('LICENSE_MONITOR_INSTALL_PATH', os.getcwd()))
-        init_file = str(getattr(config, 'license_log_server_init_file', '') or (install_path + '/config/others/license_log_server.init'))
-
-        if not os.path.exists(init_file):
-            self.vprint('    License log server init file "' + init_file + '" does not exist, skip LOG CURVE sampling.')
-            return
-
-        curve_db_path = str(config.db_path) + '/license_log'
-        self.create_db_path(curve_db_path)
-
-        self.log_curve_parser = common_license_log.LicenseLogParser(
-            log_config_file=init_file,
-            db_path=curve_db_path,
-            ssh_user=getattr(config, 'license_log_ssh_user', ''),
-        )
-        self.vprint('>>> LOG CURVE sampling (from "' + init_file + '") ...')
-
-    def sample_license_log_curves(self):
-        """
-        Read license.log of every server listed in license_log_server.init and
-        store OUT/IN events into db_path/license_log/<log file name>/events.csv
-        (one directory per log file, with a log_info.txt marker).  The GUI LOG
-        CURVE tab reads these csv files directly, therefore db_path must be
-        visible to the GUI host (shared NFS or regular sync).
-        """
-        self.init_log_curve_parser()
-
-        if not self.log_curve_parser:
-            return
-
-        store_failed = False
-
-        for license_server in sorted(self.log_curve_parser.log_dic.keys()):
-            log_path = self.log_curve_parser.log_dic[license_server]
-            store_name = self.log_curve_parser.get_log_store_dir_name(license_server, log_path)
-            log_db_path = str(config.db_path) + '/license_log/' + str(store_name)
-            events_csv_file = log_db_path + '/events.csv'
-            log_info_file = log_db_path + '/log_info.txt'
-
-            try:
-                event_list = self.log_curve_parser.get_log_events(license_server)
-            except Exception as error:
-                event_list = []
-                print('LOG CURVE READ: NO server=' + str(license_server) + ' log=' + str(log_path) + ' reason=' + str(error).replace('\n', ' ')[:120])
-
-            result = self.log_curve_parser.read_result_dic.get(license_server, {})
-            status = str(result.get('status', 'NOT_READ')).upper()
-
-            if status != 'READ':
-                continue
-
-            try:
-                stored_event_list = common_license_log.LicenseLogParser.load_events_csv(events_csv_file)
-                merged_event_list = common_license_log.LicenseLogParser.merge_event_lists(stored_event_list, event_list)
-                merged_event_list.sort(key=lambda event: event['timestamp_second'])
-
-                for event in merged_event_list:
-                    event['license_server'] = license_server
-                    event['log_path'] = log_path
-
-                common_license_log.LicenseLogParser.write_events_csv(events_csv_file, merged_event_list)
-
-                with open(log_info_file, 'w', encoding='utf-8') as log_info:
-                    log_info.write('license_server=' + str(license_server) + '\n')
-                    log_info.write('log_path=' + str(log_path) + '\n')
-
-                print('LOG CURVE READ: YES server=' + str(license_server) + ' log=' + str(log_path) + ' new_events=' + str(result.get('new_events', 0)) + ' total_events=' + str(len(merged_event_list)))
-            except Exception as error:
-                store_failed = True
-                print('LOG CURVE READ: NO server=' + str(license_server) + ' log=' + str(log_path) + ' reason=store-failed: ' + str(error).replace('\n', ' ')[:120])
-                common.bprint('Failed on storing LOG CURVE data into "' + str(events_csv_file) + '".', level='Warning')
-                common.bprint(error, color='yellow', display_method=1, indent=9)
-
-        if not store_failed:
-            # Offsets are committed only after events are stored successfully,
-            # otherwise the events will be read again next time.
-            self.log_curve_parser.commit_log_state()
-
     def create_db_path(self, db_path):
         """
         Create db_path if not exists.
@@ -1160,11 +1066,6 @@ class Sampling:
         if not ((hasattr(config, 'db_path')) and config.db_path):
             common.bprint('No "db_path" is specified on config/config.py.', level='Error')
             sys.exit(1)
-
-        # LOG CURVE data collection: read logs listed in
-        # license_log_server.init and store per-log csv data for the GUI tab.
-        # Designed for a collector host with SSH access (for example cron).
-        self.sample_license_log_curves()
 
         processes = []
 
