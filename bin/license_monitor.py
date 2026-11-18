@@ -2631,7 +2631,7 @@ licenseMonitor is an open source software for EDA software license information d
         license_server_list = []
 
         if self.log_curve_parser:
-            license_server_list = sorted(self.log_curve_parser.log_dic.keys())
+            license_server_list = self.log_curve_parser.get_server_list()
 
         license_server_list.insert(0, 'ALL')
 
@@ -2647,7 +2647,7 @@ licenseMonitor is an open source software for EDA software license information d
             common.bprint('LOG CURVE tab is not configured, please check "license_log_server_init_file" in config.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
             return
 
-        if not self.log_curve_parser.log_dic:
+        if not self.log_curve_parser.get_server_list():
             common.bprint('No license server is specified in license log init file, nothing to check.', date_format='%Y-%m-%d %H:%M:%S', level='Warning')
             return
 
@@ -2789,7 +2789,7 @@ licenseMonitor is an open source software for EDA software license information d
         log_path_list = []
 
         if self.log_curve_parser:
-            for log_path in self.log_curve_parser.log_dic.values():
+            for log_path in self.log_curve_parser.get_log_path_list():
                 if log_path and (log_path not in log_path_list):
                     log_path_list.append(log_path)
 

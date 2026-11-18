@@ -71,6 +71,11 @@ class LicenseLogParser():
         self.ssh_user = str(ssh_user or '')
         self.db_path = db_path
         self.state_file = os.path.join(str(db_path), 'license_log_state.json') if db_path else ''
+        # Authoritative log entries: one item per log, one license server may
+        # own SEVERAL log entries (init file lines with the same ServerName).
+        # log_dic/remote_dic are kept as legacy views for one-log-per-server
+        # consumers (yaml config, license_sample).
+        self.log_entries = []
         self.log_dic = {}
         self.remote_dic = {}
         self.state_dic = {}
@@ -170,12 +175,17 @@ class LicenseLogParser():
                 if isinstance(license_server, str) and isinstance(log_path, str) and log_path.strip():
                     license_server = license_server.strip()
                     expanded_path = os.path.expandvars(os.path.expanduser(log_path.strip()))
-                    self.log_dic[license_server] = os.path.normpath(expanded_path) if os.path.isabs(expanded_path) else expanded_path
+                    normalized_path = os.path.normpath(expanded_path) if os.path.isabs(expanded_path) else expanded_path
+                    self.log_dic[license_server] = normalized_path
                     self.remote_dic[license_server] = {
                         'host': remote_host or self.get_host_from_server(license_server),
                         'user': remote_user or self.ssh_user,
                         'explicit_host': bool(remote_host),
                     }
+                    self.log_entries.append({
+                                             'license_server': license_server,
+                                             'log_path': normalized_path,
+                                            })
         except Exception as error:
             common.bprint('Failed on loading license log config from "' + str(self.log_config_file) + '".', level='Warning')
             common.bprint(error, color='yellow', display_method=1, indent=9)
@@ -185,12 +195,19 @@ class LicenseLogParser():
         """
         Load license log paths from a plain text init file.
 
-        One license server per line, format:
+        One log per line, format:
 
-            MasterServer:/apps/eda/license.log
+            ServerName:/path/to/license.log
 
-        Empty lines and lines starting with "#" are ignored.  The log is read
-        from the license server over SSH when it is not a local file.
+        One license server may own SEVERAL logs: repeat the server name with
+        different log paths, for example:
+
+            MasterServer:/apps/license/empyrean.log
+            MasterServer:/apps/license/cadence_lic.log
+            nsshvser08:/root/license/cadence.log
+
+        Empty lines and lines starting with "#" are ignored.  Each log is read
+        from its license server over SSH when it is not a local file.
         """
         try:
             with open(self.log_config_file, 'r', encoding='utf-8') as log_config_file:
@@ -214,16 +231,60 @@ class LicenseLogParser():
 
                     # Keep the log path as-is (no normpath), a remote POSIX
                     # path must not be converted on a Windows client.
-                    self.log_dic[license_server] = os.path.expandvars(os.path.expanduser(log_path))
-                    self.remote_dic[license_server] = {
-                        'host': self.get_host_from_server(license_server),
-                        'user': self.ssh_user,
-                        'explicit_host': False,
-                    }
+                    self.append_log_entry(license_server, log_path)
         except Exception as error:
             common.bprint('Failed on loading license log init file from "' + str(self.log_config_file) + '".', level='Warning')
             common.bprint(error, color='yellow', display_method=1, indent=9)
             self.log_dic = {}
+            self.log_entries = []
+
+    def append_log_entry(self, license_server, log_path):
+        """
+        Add one (license_server, log_path) entry.  One license server may own
+        several log entries; duplicated (server, path) lines are ignored.
+        """
+        license_server = str(license_server).strip()
+        expanded_path = os.path.expandvars(os.path.expanduser(str(log_path).strip()))
+
+        if (not license_server) or (not expanded_path):
+            return
+
+        # Keep the log path as-is (no normpath), a remote POSIX path must not
+        # be converted on a Windows client.
+        for entry in self.log_entries:
+            if (entry['license_server'] == license_server) and (entry['log_path'] == expanded_path):
+                return
+
+        self.log_entries.append({
+                                'license_server': license_server,
+                                'log_path': expanded_path,
+                               })
+        # Legacy single-log view: the last path of a server wins.
+        self.log_dic[license_server] = expanded_path
+        self.remote_dic[license_server] = {
+            'host': self.get_host_from_server(license_server),
+            'user': self.ssh_user,
+            'explicit_host': False,
+        }
+
+    def iter_log_entries(self):
+        """
+        Iterate all (license_server, log_path) entries.
+        """
+        for entry in self.log_entries:
+            yield entry['license_server'], entry['log_path']
+
+    def get_server_list(self):
+        """
+        Get the sorted unique license server list of all log entries.
+        """
+        return sorted(set(entry['license_server'] for entry in self.log_entries))
+
+    def get_log_path_list(self):
+        """
+        Get the log path list of all log entries.
+        """
+        return [entry['log_path'] for entry in self.log_entries]
 
     @staticmethod
     def get_host_from_server(license_server):
@@ -447,21 +508,36 @@ class LicenseLogParser():
 
         return current_size, base64.b64encode(signature_bytes).decode('ascii'), new_bytes
 
-    def get_log_events(self, license_server):
+    def get_log_events(self, license_server, log_path=''):
         """
-        Read only new complete lines for one server.
+        Read only new complete lines for one license log entry.
 
-        If the discovered path is not local, read it on the license server over
-        SSH.  Returned events are held in pending_state_dic until
+        One license server may own several log entries (init file lines with
+        the same ServerName): pass log_path to read a specific log, otherwise
+        the path stored in log_dic is read (legacy one-log-per-server
+        behavior).  If the path is not local, read it on the license server
+        over SSH.  Returned events are held in pending_state_dic until
         commit_log_state() is called, so a SQLite failure cannot lose events.
         """
         event_list = []
 
-        if license_server not in self.log_dic:
+        log_path = str(log_path or '')
+
+        if (not log_path) and (license_server not in self.log_dic):
             return event_list
 
-        log_path = self.log_dic[license_server]
-        remote_info = self.remote_dic.get(license_server, {})
+        if not log_path:
+            log_path = str(self.log_dic[license_server])
+
+        remote_info = self.remote_dic.get(license_server)
+
+        if remote_info is None:
+            remote_info = {
+                'host': self.get_host_from_server(license_server),
+                'user': self.ssh_user,
+                'explicit_host': False,
+            }
+            self.remote_dic[license_server] = remote_info
         force_remote = bool(remote_info.get('explicit_host', False))
         local_file_exists = os.path.exists(log_path)
         self.read_result_dic[license_server] = {
@@ -470,6 +546,7 @@ class LicenseLogParser():
             'new_events': 0,
             'reason': '',
         }
+        self.read_result_dic[log_path] = self.read_result_dic[license_server]
 
         if (not local_file_exists) and (not remote_info.get('host')):
             self.read_result_dic[license_server]['status'] = 'ERROR'

@@ -171,20 +171,22 @@ class CollectLicenseLog():
 
         store_failed = False
 
-        for license_server in sorted(self.log_parser.log_dic.keys()):
-            log_path = self.log_parser.log_dic[license_server]
+        # One license server may own several log entries (init file lines with
+        # the same ServerName): every (server, log) pair is collected and
+        # stored into its own directory.
+        for (license_server, log_path) in sorted(self.log_parser.iter_log_entries()):
             store_name = self.log_parser.get_log_store_dir_name(license_server, log_path)
             log_db_path = self.curve_db_path + '/' + str(store_name)
             events_csv_file = log_db_path + '/events.csv'
             log_info_file = log_db_path + '/log_info.txt'
 
             try:
-                event_list = self.log_parser.get_log_events(license_server)
+                event_list = self.log_parser.get_log_events(license_server, log_path=log_path)
             except Exception as error:
                 event_list = []
                 print('LOG CURVE READ: NO server=' + str(license_server) + ' log=' + str(log_path) + ' reason=' + str(error).replace('\n', ' ')[:120])
 
-            result = self.log_parser.read_result_dic.get(license_server, {})
+            result = self.log_parser.read_result_dic.get(log_path, {})
             status = str(result.get('status', 'NOT_READ')).upper()
 
             if status != 'READ':

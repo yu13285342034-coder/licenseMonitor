@@ -53,9 +53,12 @@ Execute below command under install directory.
 ### 5. LOG CURVE tab
   - Show license usage curve parsed from license manager debug log (license.log).
   - License servers and license log paths are specified manually in an init file,
-    one server per line with format:
+    one log per line with format (one license server may own SEVERAL logs,
+    repeat the server name with different log paths):
 
         MasterServer:/apps/eda/license.log
+        MasterServer:/apps/license/cadence_lic.log
+        nsshvser08:/root/license/cadence.log
 
   - The init file path is set by "license_log_server_init_file" in config/config.py,
     default is config/others/license_log_server.init
