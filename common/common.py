@@ -352,7 +352,7 @@ def ssh_client(host_name='', port=22, user_name=getpass.getuser(), password='', 
         '-p', str(port),
         '-o', 'BatchMode=yes',
         '-o', 'ConnectTimeout=' + str(timeout),
-        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', 'StrictHostKeyChecking=no',
         str(user_name) + '@' + str(host_name),
         str(command),
     ]
